@@ -34,6 +34,8 @@ $_['entry_cryptocurrencies'] = 'Accepted Cryptocurrencies';
 $_['entry_btc_address'] = $_['text_btc'] . ' Address';
 
 $_['entry_order_status'] = 'Order status';
+$_['entry_paid_order_statuses'] = 'Paid order statuses';
+$_['text_paid_order_statuses'] = 'Select which order statuses count as "paid". Orders in these statuses will not be re-processed by callbacks or polled for further payments. Hold Ctrl/Cmd to select multiple.';
 $_['entry_status'] = 'Status';
 
 $_['branding'] = 'Show BlockBee logo and credits below the QR code';
@@ -74,6 +76,7 @@ $_['entry_sort_order'] = 'Sort order';
 
 // Error
 $_['error_permission'] = 'Warning: You do not have permission to modify the BlockBee payment module';
+$_['warning_currency_unsupported'] = 'Your store currency (%s) is not in BlockBee\'s supported fiat list. Blockchain fee estimates will fall back to USD. See https://blockbee.io/fees/ for the current supported set.';
 
 // Help hints
 $_['help_cryptocurrencies'] = 'If you are using BlockBee you can choose if setting the receiving addresses here bellow or in your BlockBee settings page.<br/>In order to set the addresses on plugin settings, you need to select “Address Override” while creating the API key.<br/>In order to set the addresses on BlockBee settings, you need to NOT select “Address Override” while creating the API key.';

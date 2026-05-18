@@ -49,7 +49,7 @@ class BlockBeeHelper
 
         $response = BlockBeeHelper::_request($this->coin, 'create', $bb_params);
 
-        if ($response->status == 'success') {
+        if (is_object($response) && ($response->status ?? '') === 'success') {
             $this->payment_address = $response->address_in;
 
             return $response->address_in;
@@ -57,7 +57,7 @@ class BlockBeeHelper
 
         return null;
     }
-    
+
     public function checklogs()
     {
 
@@ -70,7 +70,7 @@ class BlockBeeHelper
 
         $response = BlockBeeHelper::_request($this->coin, 'logs', $params);
 
-        if ($response->status == 'success') {
+        if (is_object($response) && ($response->status ?? '') === 'success') {
             return $response;
         }
 
@@ -98,7 +98,7 @@ class BlockBeeHelper
 
         $response = BlockBeeHelper::_request($this->coin, 'qrcode', $params);
 
-        if ($response->status == 'success') {
+        if (is_object($response) && ($response->status ?? '') === 'success') {
             return ['qr_code' => $response->qr_code, 'uri' => $response->payment_uri];
         }
 
@@ -128,7 +128,7 @@ class BlockBeeHelper
 
         $response = BlockBeeHelper::_request($coin, 'qrcode', $params);
 
-        if ($response->status == 'success') {
+        if (is_object($response) && ($response->status ?? '') === 'success') {
             return ['qr_code' => $response->qr_code, 'uri' => $response->payment_uri];
         }
 
@@ -184,27 +184,70 @@ class BlockBeeHelper
 
         $response = BlockBeeHelper::_request($coin, 'info', $params, $assoc);
 
-        if (empty($coin) || $response->status == 'success') {
+        if (empty($response)) {
+            return null;
+        }
+
+        if (empty($coin)) {
             return $response;
         }
 
-        return null;
+        $status = is_object($response) ? ($response->status ?? '') : ($response['status'] ?? '');
+        return $status === 'success' ? $response : null;
+    }
+
+    /**
+     * Fetches the BlockBee RSA public key (PEM) from the API.
+     * Caller should cache the result — BlockBee rotates this rarely.
+     * https://docs.blockbee.io/webhooks/verify-webhook-signature
+     */
+    public static function fetch_pubkey(): ?string
+    {
+        $response = BlockBeeHelper::_request('', 'pubkey', [], false);
+
+        if (!is_object($response) || ($response->status ?? '') !== 'success' || empty($response->pubkey)) {
+            return null;
+        }
+
+        return $response->pubkey;
+    }
+
+    /**
+     * Verifies a BlockBee webhook signature.
+     *
+     * @param string $signed_payload  For GET callbacks, the full request URL exactly as received.
+     *                                For POST callbacks, the raw request body.
+     * @param string $signature_b64   Contents of the x-ca-signature header.
+     * @param string $pubkey_pem      PEM-encoded RSA public key from fetch_pubkey().
+     */
+    public static function verify_signature(string $signed_payload, string $signature_b64, string $pubkey_pem): bool
+    {
+        if ($signed_payload === '' || $signature_b64 === '' || $pubkey_pem === '') {
+            return false;
+        }
+
+        $signature = base64_decode($signature_b64, true);
+        if ($signature === false) {
+            return false;
+        }
+
+        return openssl_verify($signed_payload, $signature, $pubkey_pem, OPENSSL_ALGO_SHA256) === 1;
     }
 
     public static function process_callback($_get)
     {
+        // Fields per https://docs.blockbee.io/webhooks/custom-payment-flow-webhooks
         $params = [
-            'address_in' => $_get['address_in'],
-            'address_out' => $_get['address_out'],
-            'txid_in' => $_get['txid_in'],
-            'txid_out' => isset($_get['txid_out']) ? $_get['txid_out'] : null,
-            'confirmations' => $_get['confirmations'],
-            'value' => $_get['value'],
-            'value_coin' => $_get['value_coin'],
-            'value_forwarded' => isset($_get['value_forwarded']) ? $_get['value_forwarded'] : null,
-            'value_forwarded_coin' => isset($_get['value_forwarded_coin']) ? $_get['value_forwarded_coin'] : null,
-            'coin' => $_get['coin'],
-            'pending' => isset($_get['pending']) ? $_get['pending'] : false,
+            'uuid' => $_get['uuid'] ?? null,
+            'address_in' => $_get['address_in'] ?? null,
+            'address_out' => $_get['address_out'] ?? null,
+            'txid_in' => $_get['txid_in'] ?? null,
+            'txid_out' => $_get['txid_out'] ?? null,
+            'confirmations' => $_get['confirmations'] ?? null,
+            'value_coin' => $_get['value_coin'] ?? null,
+            'value_forwarded_coin' => $_get['value_forwarded_coin'] ?? null,
+            'coin' => $_get['coin'] ?? null,
+            'pending' => $_get['pending'] ?? 1,
         ];
 
         foreach ($_get as $k => $v) {
@@ -235,7 +278,7 @@ class BlockBeeHelper
 
         $response = BlockBeeHelper::_request('', 'convert', $params);
 
-        if ($response->status == 'success') {
+        if (is_object($response) && ($response->status ?? '') === 'success') {
             return $response->value_coin;
         }
 
@@ -253,8 +296,7 @@ class BlockBeeHelper
 
         $response = BlockBeeHelper::_request($coin, 'estimate', $params);
 
-        if ($response->status == 'success') {
-
+        if (is_object($response) && ($response->status ?? '') === 'success') {
             return $response->estimated_cost_currency;
         }
 
@@ -309,12 +351,7 @@ class BlockBeeHelper
 
     private static function _request($coin, $endpoint, $params = [], $assoc = false)
     {
-
         $base_url = BlockBeeHelper::$base_url;
-
-        if (!empty($params)) {
-            $data = http_build_query($params);
-        }
 
         if (!empty($coin)) {
             $coin = str_replace('_', '/', $coin);
@@ -323,25 +360,23 @@ class BlockBeeHelper
             $url = "{$base_url}/{$endpoint}/";
         }
 
-        if (!empty($data)) {
-            $url .= "?{$data}";
+        if (!empty($params)) {
+            $url .= '?' . http_build_query($params);
         }
 
         $curl = curl_init($url);
         curl_setopt($curl, CURLOPT_HEADER, 0);
-        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0);
-        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
+        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
+        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
         curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
 
         $response = curl_exec($curl);
+        curl_close($curl);
 
-        $json = [];
-
-        if (curl_error($curl)) {
-            $json['error'] = 'ERROR: ' . curl_errno($curl) . '::' . curl_error($curl);
-            return $json;
-        } elseif ($response) {
-            return json_decode($response, $assoc);
+        if ($response === false || $response === '') {
+            return null;
         }
+
+        return json_decode($response, $assoc);
     }
 }

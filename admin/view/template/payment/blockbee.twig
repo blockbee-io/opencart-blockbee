@@ -20,6 +20,11 @@
                 <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
             </div>
         {% endif %}
+        {% if currency_warning %}
+            <div class="alert alert-warning alert-dismissible"><i class="fas fa-exclamation-triangle"></i> {{ currency_warning }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+        {% endif %}
         <div class="alert alert-info" style="overflow: hidden;">
             <div class="row">
                 {{ text_blockbee_image }}<br/>
@@ -304,10 +309,7 @@
                                             {% if payment_blockbee_qrcode_default is empty or payment_blockbee_qrcode_default != '0' %}
                                                 <option value="1" selected="selected">{{ text_enabled }}</option>
                                                 <option value="0">{{ text_disabled }}</option>
-                                            {% elseif payment_blockbee_branding == 1 %}
-                                                <option value="1" selected="selected">{{ text_enabled }}</option>
-                                                <option value="0">{{ text_disabled }}</option>
-                                            {% elseif payment_blockbee_branding == 0 %}
+                                            {% else %}
                                                 <option value="1">{{ text_enabled }}</option>
                                                 <option value="0" selected="selected">{{ text_disabled }}</option>
                                             {% endif %}
@@ -528,6 +530,24 @@
                                 </div>
                             </div>
                             <div class="row mb-3">
+                                <label class="col-sm-2 col-form-label" for="input-paid-order-statuses" data-bs-toggle="tooltip" data-bs-placement="right" title="{{ text_paid_order_statuses }}">
+                                    {{ entry_paid_order_statuses }}
+                                    {{ info_icon }}
+                                </label>
+                                <div class="col-sm-10">
+                                    <div class="input-group">
+                                        <select name="payment_blockbee_paid_order_status_ids[]" id="input-paid-order-statuses" multiple="multiple" size="6" class="form-select">
+                                            {% for order_status in all_order_statuses %}
+                                                <option value="{{ order_status.order_status_id }}"
+                                                    {% if order_status.order_status_id in payment_blockbee_paid_order_status_ids %}selected="selected"{% endif %}>
+                                                    {{ order_status.name }}
+                                                </option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row mb-3">
                                 <label class="col-sm-2 col-form-label" for="input-sort-order">{{ entry_sort_order }}</label>
                                 <div class="col-sm-10">
                                     <div class="input-group">
@@ -542,7 +562,7 @@
                                 </label>
                                 <div class="col-sm-10">
                                     <div class="input-group">
-                                        <input class="form-control" type="text" id="blockbee_blockbee_api_key" name='payment_blockbee_api_key'
+                                        <input class="form-control" type="password" autocomplete="off" id="blockbee_blockbee_api_key" name='payment_blockbee_api_key'
                                                {% if payment_blockbee_api_key is empty %}value="" {% else %}value="{{ payment_blockbee_api_key }}"{% endif %}>
                                     </div>
                                     <small class="text-muted form-text">{{ api_key_info }}</small>

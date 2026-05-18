@@ -11,7 +11,7 @@ OpenCart >= 4.0
 
 ### Description
 
-Accept payments in Bitcoin, Bitcoin Cash, Litecoin, Ethereum, USDT and Matic directly to your crypto wallet.
+Accept payments in Bitcoin, Bitcoin Cash, Litecoin, Ethereum, USDT and Polygon directly to your crypto wallet.
 
 #### Allow users to pay with crypto directly on your store
 
@@ -23,7 +23,7 @@ The BlockBee plugin extends OpenCart, allowing you to get paid in crypto directl
 * (ETH) Ethereum
 * (BCH) Bitcoin Cash
 * (LTC) Litecoin
-* (MATIC) Matic
+* (POL) Polygon
 * (TRX) Tron
 * (BNB) Binance Coin
 * (USDT) USDT
@@ -41,7 +41,21 @@ Exchange rates are fetched every 5 minutes from CoinGecko.
 
 Supported currencies for automatic exchange rates are:
 
-* (XAF) CFA Franc
+* (USD) United States Dollar
+* (EUR) Euro
+* (GBP) Great Britain Pound
+* (CAD) Canadian Dollar
+* (JPY) Japanese Yen
+* (AED) UAE Dollar
+* (MYR) Malaysian Ringgit
+* (IDR) Indonesian Rupiah
+* (THB) Thai Baht
+* (CHF) Swiss Franc
+* (SGD) Singapore Dollar
+* (RUB) Russian Ruble
+* (ZAR) South African Rand
+* (TRY) Turkish Lira
+* (LKR) Sri Lankan Rupee
 * (RON) Romanian Leu
 * (BGN) Bulgarian Lev
 * (HUF) Hungarian Forint
@@ -55,12 +69,13 @@ Supported currencies for automatic exchange rates are:
 * (CNY) Chinese Yuan
 * (BRL) Brazilian Real
 * (DKK) Danish Krone
-* (AED) UAE Dirham
-* (JPY) Japanese Yen
-* (CAD) Canadian Dollar
-* (GBP) GB Pound
-* (EUR) Euro
-* (USD) US Dollar
+* (TWD) New Taiwan Dollar
+* (AUD) Australian Dollar
+* (NGN) Nigerian Naira
+* (SEK) Swedish Krona
+* (NOK) Norwegian Krone
+* (UAH) Ukrainian Hryvnia
+* (VND) Vietnamese Dong
 
 If your OpenCart's currency is none of the above, the exchange rates will default to USD.
 If you're using OpenCart in a different currency not listed here and need support, please [contact us](https://blockbee.io) via our live chat.
@@ -93,7 +108,15 @@ For more info on our fees [click here](https://blockbee.io/fees)
 
 ### Cronjob
 
-<!-- Some features require a cronjob to work. You need to create one in your hosting that runs every 1 minute. It should call this URL ``YOUR-DOMAIN/index.php?route=extension/cryptapi/payment/cryptapi|cron``. -->
+Some features require a cronjob to run every 1 minute. Without it, conversion rates won't refresh and orders won't auto-cancel on timeout.
+
+Configure your hosting to call:
+
+```
+https://YOUR-DOMAIN/index.php?route=extension/blockbee/payment/blockbee|cron
+```
+
+Most shared hosts expose this via a cPanel "Cron Jobs" section. A 1-minute schedule (`* * * * *`) is recommended.
 
 ### Frequently Asked Questions
 
@@ -138,5 +161,12 @@ The easiest and fastest way is via our live chat on our [website](https://blockb
 * Add new choices for order cancellation.
 * Minor bugfixes.
 
+#### 1.1.0
+* OpenCart 4.x compatibility fixes.
+* Improved webhook security with signature verification.
+* New admin warning for unsupported store currencies.
+* Various bugfixes and improvements.
+* Added translations
+
 ### Upgrade Notice
-* No breaking changes
+* No breaking changes.

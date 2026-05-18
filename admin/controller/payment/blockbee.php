@@ -28,6 +28,14 @@ class BlockBee extends \Opencart\System\Engine\Controller
 
             $this->request->post['payment_blockbee_cryptocurrencies'] = $a;
 
+            $paid_statuses = [];
+            if (isset($_POST['payment_blockbee_paid_order_status_ids'])) {
+                foreach ($_POST['payment_blockbee_paid_order_status_ids'] as $value) {
+                    $paid_statuses[] = (int)$value;
+                }
+            }
+            $this->request->post['payment_blockbee_paid_order_status_ids'] = $paid_statuses;
+
             $this->model_setting_setting->editSetting('payment_blockbee', $this->request->post);
 
             $this->session->data['success'] = $this->language->get('text_success');
@@ -64,6 +72,14 @@ class BlockBee extends \Opencart\System\Engine\Controller
             }
         }
         $data['order_statuses'] = $orderStatusesFiltered;
+        $data['all_order_statuses'] = $orderStatuses;
+
+        if (isset($this->request->post['payment_blockbee_paid_order_status_ids'])) {
+            $data['payment_blockbee_paid_order_status_ids'] = $this->request->post['payment_blockbee_paid_order_status_ids'];
+        } else {
+            $saved_paid = $this->config->get('payment_blockbee_paid_order_status_ids');
+            $data['payment_blockbee_paid_order_status_ids'] = is_array($saved_paid) ? $saved_paid : [2, 3, 15];
+        }
 
         if (isset($this->error['warning'])) {
             $data['error_warning'] = $this->error['warning'];
@@ -204,6 +220,22 @@ class BlockBee extends \Opencart\System\Engine\Controller
             $data['payment_blockbee_sort_order'] = $this->config->get('payment_blockbee_sort_order');
         }
 
+        $data['currency_warning'] = '';
+        $store_currency = $this->config->get('config_currency');
+        if (!empty($data['payment_blockbee_api_key']) && !empty($store_currency)) {
+            $supported = $this->cache->get('blockbee.fiat_currencies');
+            if (empty($supported) || !is_array($supported)) {
+                $estimate = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_estimate('btc', $data['payment_blockbee_api_key']);
+                if (is_object($estimate)) {
+                    $supported = array_keys(get_object_vars($estimate));
+                    $this->cache->set('blockbee.fiat_currencies', $supported);
+                }
+            }
+            if (is_array($supported) && !in_array($store_currency, $supported, true)) {
+                $data['currency_warning'] = sprintf($this->language->get('warning_currency_unsupported'), $store_currency);
+            }
+        }
+
         $data['header'] = $this->load->controller('common/header');
         $data['column_left'] = $this->load->controller('common/column_left');
         $data['footer'] = $this->load->controller('common/footer');
@@ -256,5 +288,12 @@ class BlockBee extends \Opencart\System\Engine\Controller
         $this->load->model('extension/blockbee/payment/blockbee');
 
         $this->model_extension_blockbee_payment_blockbee->install();
+    }
+
+    public function uninstall(): void
+    {
+        $this->load->model('extension/blockbee/payment/blockbee');
+
+        $this->model_extension_blockbee_payment_blockbee->uninstall();
     }
 }
