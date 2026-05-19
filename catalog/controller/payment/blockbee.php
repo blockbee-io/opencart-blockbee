@@ -419,7 +419,7 @@ class BlockBee extends \Opencart\System\Engine\Controller
             'show_min_fee' => $showMinFee,
             'order_history' => $history,
             'already_paid' => $currencySymbolLeft . $already_paid . $currencySymbolRight,
-            'already_paid_fiat' => floatval($already_paid_fiat) <= 0 ? 0 : floatval($already_paid_fiat), true, false,
+            'already_paid_fiat' => floatval($already_paid_fiat) <= 0 ? 0 : floatval($already_paid_fiat),
             'counter' => (string)$counter_calc,
             'fiat_symbol_left' => $currencySymbolLeft,
             'fiat_symbol_right' => $currencySymbolRight,
