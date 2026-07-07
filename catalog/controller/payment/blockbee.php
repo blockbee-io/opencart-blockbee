@@ -4,6 +4,135 @@ namespace Opencart\Catalog\Controller\Extension\BlockBee\Payment;
 
 class BlockBee extends \Opencart\System\Engine\Controller
 {
+    /**
+     * Authorize a customer view of an order's payment state.
+     * Self-sufficient — loads the payment model itself so it is safe to call
+     * before the caller has loaded it (status() previously loaded it AFTER the gate).
+     */
+    private function authorizeOrderAccess(array $order): bool
+    {
+        $order_id = (int)($order['order_id'] ?? 0);
+        if ($order_id <= 0) {
+            return false;
+        }
+        $this->load->model('extension/blockbee/payment/blockbee');
+
+        // (a) same-session owner: confirm->pay redirect + live pay-page polling.
+        if ((int)($this->session->data['order_id'] ?? 0) === $order_id) {
+            return true;
+        }
+        // (a') logged-in customer owns the order. In OC4 $this->customer is a
+        // registry magic-property, so isset() is unreliable — call isLogged() directly.
+        $customer_id = (int)($order['customer_id'] ?? 0);
+        if ($customer_id > 0 && $this->customer->isLogged() && (int)$this->customer->getId() === $customer_id) {
+            return true;
+        }
+        // (b) per-order access token: guest checkout / email link / account button / new session.
+        $token = (string)($this->request->get['token'] ?? '');
+        if ($token !== '') {
+            $meta = json_decode((string)$this->model_extension_blockbee_payment_blockbee->getPaymentData($order_id), true);
+            $stored = is_array($meta) ? (string)($meta['blockbee_token'] ?? '') : '';
+            if ($stored !== '' && hash_equals($stored, $token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Gate the public |cron route.
+     * CLI always; a configured secret always; loopback ONLY when the request
+     * did not arrive through a proxy (no forwarding headers).
+     */
+    private function isCronAuthorized(): bool
+    {
+        if (PHP_SAPI === 'cli' || php_sapi_name() === 'cli') {
+            return true;
+        }
+        // Configured secret works everywhere (including behind proxies).
+        $secret = (string)$this->config->get('payment_blockbee_cron_secret');
+        if ($secret !== '') {
+            $provided = (string)($this->request->get['secret'] ?? '');
+            if ($provided !== '' && hash_equals($secret, $provided)) {
+                return true;
+            }
+        }
+        // Trust loopback ONLY when the request did NOT arrive through a proxy.
+        // Behind a same-host reverse proxy REMOTE_ADDR is loopback for ALL external
+        // traffic, so require the absence of forwarding headers.
+        $behind_proxy = !empty($_SERVER['HTTP_X_FORWARDED_FOR'])
+            || !empty($_SERVER['HTTP_X_FORWARDED_HOST'])
+            || !empty($_SERVER['HTTP_X_REAL_IP'])
+            || !empty($_SERVER['HTTP_FORWARDED']);
+        $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+        if (!$behind_proxy && in_array($remote, ['127.0.0.1', '::1', '::ffff:127.0.0.1'], true)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Per-order refresh + cancel (extracted from the old cron loop).
+     * Requires the library to be loaded by the caller.
+     */
+    private function refreshOrder(array $order): void
+    {
+        $order_timeout = (int)$this->config->get('payment_blockbee_order_cancelation_timeout');
+        $value_refresh = (int)$this->config->get('payment_blockbee_refresh_values');
+        $qrcode_size   = (int)$this->config->get('payment_blockbee_qrcode_size');
+        $apiKey        = $this->config->get('payment_blockbee_api_key');
+        $lib           = '\\Opencart\\Extension\\BlockBee\\System\\Library\\BlockBeeHelper';
+
+        if ($order_timeout === 0 && $value_refresh === 0) {
+            return;
+        }
+
+        $order_id = (int)$order['order_id'];
+        $currency = $order['currency_code'];
+        $metaData = json_decode($this->model_extension_blockbee_payment_blockbee->getPaymentData($order_id), true);
+        if (empty($metaData['blockbee_last_price_update'])) {
+            return;
+        }
+
+        $last_price_update = $metaData['blockbee_last_price_update'];
+        $history = json_decode($metaData['blockbee_history'], true) ?: [];
+        $min_tx  = floatval($metaData['blockbee_min']);
+
+        $calc = $lib::calc_order($history, $metaData['blockbee_total'], floatval($metaData['blockbee_total_fiat']));
+        $remaining         = $calc['remaining'];
+        $remaining_pending = $calc['remaining_pending'];
+        $already_paid      = $calc['already_paid'];
+
+        if ($value_refresh !== 0 && $last_price_update + $value_refresh <= time()) {
+            if ($remaining === $remaining_pending) {
+                $blockbee_coin = $metaData['blockbee_currency'];
+                $crypto_total  = $lib::get_conversion($currency, $blockbee_coin, $metaData['blockbee_total_fiat'], $this->config->get('payment_blockbee_disable_conversion'), $apiKey);
+
+                // Never persist a null/non-positive re-priced total; keep prior good value.
+                if ($lib::is_positive_number($crypto_total)) {
+                    $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_total', $crypto_total);
+                    $calc_cron = $lib::calc_order($history, $crypto_total, $metaData['blockbee_total_fiat']);
+                    $crypto_remaining_total = $calc_cron['remaining_pending'];
+                    if ($remaining_pending <= $min_tx && $remaining_pending > 0) {
+                        $qr = $lib::get_static_qrcode($metaData['blockbee_address'], $blockbee_coin, $min_tx, $apiKey, $qrcode_size);
+                    } else {
+                        $qr = $lib::get_static_qrcode($metaData['blockbee_address'], $blockbee_coin, $crypto_remaining_total, $apiKey, $qrcode_size);
+                    }
+                    if (is_array($qr) && isset($qr['qr_code'])) {
+                        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_qrcode_value', $qr['qr_code']);
+                    }
+                }
+            }
+            $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_last_price_update', time());
+        }
+
+        $age_seconds = isset($order['age_seconds']) ? (int)$order['age_seconds'] : (time() - strtotime($order['date_added']));
+        if ($order_timeout !== 0 && $age_seconds >= $order_timeout && $already_paid <= 0) {
+            $this->model_checkout_order->addHistory($order_id, 7);
+            $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_canceled', '1');
+        }
+    }
+
     public function index(): string
     {
         if ($this->config->get('payment_blockbee_status')) {
@@ -79,100 +208,179 @@ class BlockBee extends \Opencart\System\Engine\Controller
 
     public function sel_crypto()
     {
+        // Validate the posted coin against the configured allow-list
+        // before it can reach the outbound API URL builder via index().
         $this->load->model('extension/blockbee/payment/blockbee');
-
-        $this->session->data['blockbee_selected'] = $_POST['blockbee_coin'];
+        $selected = (string)($this->request->post['blockbee_coin'] ?? '');
+        $allowed  = $this->config->get('payment_blockbee_cryptocurrencies');
+        if (is_array($allowed) && in_array($selected, $allowed, true)) {
+            $this->session->data['blockbee_selected'] = $selected;
+        }
     }
 
     public function confirm()
     {
-        // Library
         $this->load->language('extension/blockbee/payment/blockbee');
         require(DIR_EXTENSION . 'blockbee/system/library/blockbee.php');
+        $lib = '\\Opencart\\Extension\\BlockBee\\System\\Library\\BlockBeeHelper';
 
-        $json = array();
+        $json = [];
         $err_coin = '';
 
-        if ($this->config->get('payment_blockbee_status')) {
-            $this->load->model('checkout/order');
-            $this->load->model('extension/blockbee/payment/blockbee');
+        if (!$this->config->get('payment_blockbee_status')) {
+            $this->response->addHeader('Content-Type: application/json');
+            $this->response->setOutput(json_encode($json));
+            return;
+        }
 
-            $order_info = $this->model_checkout_order->getOrder($this->session->data['order_id']);
-            $cryptoFee = empty($this->session->data['blockbee_fee']) ? 0 : $this->session->data['blockbee_fee'];
-            $total = $this->currency->format($order_info['total'] + $cryptoFee, $order_info['currency_code'], 1.00000, false);
-            if (empty($this->request->post['blockbee_coin'])) {
+        $this->load->model('checkout/order');
+        $this->load->model('extension/blockbee/payment/blockbee');
+
+        $order_id = (int)($this->session->data['order_id'] ?? 0);
+        $order_info = $this->model_checkout_order->getOrder($order_id);
+        if (empty($order_info)) {
+            $json['error']['warning'] = sprintf($this->language->get('error_payment'), $this->language->get('error_coin'));
+            $this->response->addHeader('Content-Type: application/json');
+            $this->response->setOutput(json_encode($json));
+            return;
+        }
+
+        // Idempotency: never clobber a paid / partially-paid order.
+        $prevAddresses = [];
+        $existingRaw = $this->model_extension_blockbee_payment_blockbee->getPaymentData($order_id);
+        if (!empty($existingRaw)) {
+            $em   = json_decode($existingRaw, true) ?: [];
+            $hist = json_decode($em['blockbee_history'] ?? '[]', true) ?: [];
+            $alreadyPaid = $this->isOrderPaid($order_info) || (!empty($em['blockbee_paid']) && (string)$em['blockbee_paid'] === '1');
+            $hasPayments = is_array($hist) && count($hist) > 0;
+            if ($alreadyPaid || $hasPayments) {
+                $redir = $em['blockbee_payment_url']
+                    ?? $this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $order_id . '&token=' . ($em['blockbee_token'] ?? ''), true);
+                $json['redirect'] = str_replace('&amp;', '&', $redir);
+                $this->response->addHeader('Content-Type: application/json');
+                $this->response->setOutput(json_encode($json));
+                return;
+            }
+            // Unpaid + empty history => re-selection allowed. Preserve prior address(es)
+            // so a payment already sent to a now-replaced address is still creditable.
+            $prevAddresses = is_array($em['blockbee_prev_addresses'] ?? null) ? $em['blockbee_prev_addresses'] : [];
+            if (!empty($em['blockbee_address'])) {
+                $prevAddresses[] = (string)$em['blockbee_address'];
+            }
+            $prevAddresses = array_values(array_unique(array_filter($prevAddresses, 'strlen')));
+        }
+
+        $apiKey = $this->config->get('payment_blockbee_api_key');
+
+        // Coin allow-list.
+        if (empty($this->request->post['blockbee_coin'])) {
+            $err_coin = $this->language->get('error_coin');
+        } else {
+            $selected = $this->request->post['blockbee_coin'];
+            $allowed  = $this->config->get('payment_blockbee_cryptocurrencies');
+            if (!is_array($allowed) || !in_array($selected, $allowed, true)) {
                 $err_coin = $this->language->get('error_coin');
-            } else {
+            }
+            if (empty($apiKey)) {
+                $err_coin = $this->language->get('error_apikey');
+            }
+        }
 
-                $selected = $this->request->post['blockbee_coin'];
+        if (empty($err_coin) && !empty($apiKey)) {
+            $disable_conversion = $this->config->get('payment_blockbee_disable_conversion');
+            $qr_code_size = $this->config->get('payment_blockbee_qrcode_size');
+            $currency = $order_info['currency_code'];
 
-                $allowed = $this->config->get('payment_blockbee_cryptocurrencies');
-                if (!is_array($allowed) || !in_array($selected, $allowed, true)) {
-                    $err_coin = $this->language->get('error_coin');
-                }
-
-                $apiKey = $this->config->get('payment_blockbee_api_key');
-                if (empty($apiKey)) {
-                    $err_coin = $this->language->get('error_apikey');
+            // Server-side fee (never trust session['blockbee_fee']).
+            $order_total = floatval($order_info['total']);
+            $fee = $this->config->get('payment_blockbee_fees');
+            $blockchain_fee = $this->config->get('payment_blockbee_blockchain_fees');
+            $blockbeeFee = 0;
+            if ($fee !== 0) {
+                $blockbeeFee += floatval($fee) * $order_total;
+            }
+            if ($blockchain_fee) {
+                $estimate = $lib::get_estimate($selected, $apiKey);
+                if (is_object($estimate) && isset($estimate->$currency)) {
+                    $blockbeeFee += floatval($estimate->$currency);
+                } elseif (is_object($estimate) && isset($estimate->USD)) {
+                    $blockbeeFee += floatval($this->currency->convert($estimate->USD, 'USD', $currency));
                 }
             }
+            $cryptoFee = round($blockbeeFee, 2);
+            $total = $this->currency->format($order_info['total'] + $cryptoFee, $currency, 1.00000, false);
 
-            if (empty($err_coin) && !empty($apiKey)) {
-                $disable_conversion = $this->config->get('payment_blockbee_disable_conversion');
-                $qr_code_size = $this->config->get('payment_blockbee_qrcode_size');
-                $info = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_info($selected, false, $apiKey);
-                $minTx = floatval($info->minimum_transaction_coin);
+            $info  = $lib::get_info($selected, false, $apiKey);
+            $minTx = floatval($info->minimum_transaction_coin ?? 0);
+            $cryptoTotal = $lib::get_conversion($currency, $selected, $total, $disable_conversion, $apiKey);
 
-                $cryptoTotal = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_conversion($order_info['currency_code'], $selected, $total, $disable_conversion, $apiKey);
+            // Refuse to create an order with a non-positive total.
+            if (!$lib::is_positive_number($cryptoTotal)) {
+                $err_coin = $this->language->get('error_conversion');
+            }
 
-                $callbackUrl = $this->url->link('extension/blockbee/payment/blockbee|callback', 'order_id=' . $this->session->data['order_id'], true);
+            if (empty($err_coin)) {
+                // Per-order nonce + access token (distinct CSPRNG secrets).
+                $nonce = bin2hex(random_bytes(16));
+                $token = bin2hex(random_bytes(16));
+
+                // Registered callback URL — server-fixed base; decode &amp; so
+                // the registered string, the signed string, and REQUEST_URI all agree.
+                $callbackUrl = $this->url->link('extension/blockbee/payment/blockbee|callback', 'order_id=' . $order_id . '&nonce=' . $nonce, true);
                 $callbackUrl = str_replace('&amp;', '&', $callbackUrl);
 
                 $helper = new \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper($selected, $apiKey, $callbackUrl, [], true);
                 $addressIn = $helper->get_address();
                 if (!isset($addressIn)) {
                     $err_coin = $this->language->get('error_adress');
-                } else {
-                    if (($cryptoTotal < $minTx)) {
-                        $err_coin = $this->language->get('value_minim') . ' ' . $minTx . ' ' . strtoupper($selected);
-                    }
+                } elseif ($cryptoTotal < $minTx) {
+                    $err_coin = $this->language->get('value_minim') . ' ' . $minTx . ' ' . strtoupper($selected);
                 }
 
                 if (empty($err_coin)) {
                     $qrCodeDataValue = $helper->get_qrcode($cryptoTotal, $qr_code_size);
-                    $qrCodeData = $helper->get_qrcode('', $qr_code_size);
-                    $paymentURL = $this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $this->session->data['order_id'], true);
+                    $qrCodeData      = $helper->get_qrcode('', $qr_code_size);
+
+                    // Token baked into pay URL (email + account button + redirect).
+                    // Two params now => MUST decode &amp;.
+                    $paymentURL = $this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $order_id . '&token=' . $token, true);
+                    $paymentURL = str_replace('&amp;', '&', $paymentURL);
 
                     $paymentData = [
-                        'blockbee_fee' => $cryptoFee,
-                        'blockbee_address' => $addressIn,
-                        'blockbee_total' => $cryptoTotal,
-                        'blockbee_total_fiat' => $total,
-                        'blockbee_currency' => $selected,
-                        'blockbee_qrcode_value' => $qrCodeDataValue['qr_code'],
-                        'blockbee_qrcode' => $qrCodeData['qr_code'],
+                        'blockbee_fee'               => $cryptoFee,
+                        'blockbee_address'           => $addressIn,
+                        'blockbee_total'             => $cryptoTotal,
+                        'blockbee_total_fiat'        => $total,
+                        'blockbee_currency'          => $selected,
+                        'blockbee_qrcode_value'      => $qrCodeDataValue['qr_code'],
+                        'blockbee_qrcode'            => $qrCodeData['qr_code'],
                         'blockbee_last_price_update' => time(),
-                        'blockbee_order_timestamp' => time(),
-                        'blockbee_canceled' => '0',
-                        'blockbee_min' => $minTx,
-                        'blockbee_history' => json_encode([]),
-                        'blockbee_payment_url' => $paymentURL
+                        'blockbee_order_timestamp'   => time(),
+                        'blockbee_canceled'          => '0',
+                        'blockbee_min'               => $minTx,
+                        'blockbee_history'           => json_encode([]),
+                        'blockbee_payment_url'       => $paymentURL,
+                        'blockbee_nonce'             => $nonce,          // provider-shared callback secret
+                        'blockbee_token'             => $token,          // customer-facing access token
+                        'blockbee_callback_url'      => $callbackUrl,    // server-fixed base
+                        'blockbee_paid'              => '0',             // atomic paid marker
+                        'blockbee_prev_addresses'    => $prevAddresses,  // re-selection safety
                     ];
 
-                    $paymentData = json_encode($paymentData);
-                    $this->model_extension_blockbee_payment_blockbee->addPaymentData($this->session->data['order_id'], $paymentData);
+                    $encoded = json_encode($paymentData);
+                    $this->model_extension_blockbee_payment_blockbee->addPaymentData($order_id, $encoded);
+                    $this->model_checkout_order->addHistory($order_id, $this->config->get('payment_blockbee_order_status_id'), '', true);
+                    $this->sendPaymentInstructionsEmail($order_info, json_decode($encoded, true), $paymentURL);
 
-                    $this->model_checkout_order->addHistory($this->session->data['order_id'], $this->config->get('payment_blockbee_order_status_id'), '', true);
-
-                    $this->sendPaymentInstructionsEmail($order_info, json_decode($paymentData, true), $paymentURL);
-
-                    $json['redirect'] = $this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $this->session->data['order_id'], true);
+                    $json['redirect'] = $paymentURL;   // already &amp;-decoded
                 } else {
                     $json['error']['warning'] = sprintf($this->language->get('error_payment'), $err_coin);
                 }
             } else {
                 $json['error']['warning'] = sprintf($this->language->get('error_payment'), $err_coin);
             }
+        } else {
+            $json['error']['warning'] = sprintf($this->language->get('error_payment'), $err_coin);
         }
 
         $this->response->addHeader('Content-Type: application/json');
@@ -216,13 +424,17 @@ class BlockBee extends \Opencart\System\Engine\Controller
 
         $this->load->language('extension/blockbee/payment/blockbee');
 
+        // Don't leak ?token= via the Referer header.
+        $this->response->addHeader('Referrer-Policy: no-referrer');
+
+        $this->load->model('extension/blockbee/payment/blockbee');
+
         $order = $this->isBlockbeeOrder();
 
-        if (!$order) {
+        if (!$order || !$this->authorizeOrderAccess($order)) {
             $this->response->redirect($this->url->link('common/home', '', true));
         }
 
-        $this->load->model('extension/blockbee/payment/blockbee');
         $this->load->model('localisation/currency');
 
         $metaData = $this->model_extension_blockbee_payment_blockbee->getPaymentData($order['order_id']);
@@ -235,7 +447,9 @@ class BlockBee extends \Opencart\System\Engine\Controller
         $currencySymbolLeft = $this->model_localisation_currency->getCurrencies()[$order['currency_code']]['symbol_left'];
         $currencySymbolRight = $this->model_localisation_currency->getCurrencies()[$order['currency_code']]['symbol_right'];
 
-        $ajaxUrl = $this->url->link('extension/blockbee/payment/blockbee|status', 'order_id=' . $order['order_id'], true);
+        // Bake the per-order token into the polling URL; two params => decode &amp;.
+        $token   = is_array($metaData) ? (string)($metaData['blockbee_token'] ?? '') : '';
+        $ajaxUrl = $this->url->link('extension/blockbee/payment/blockbee|status', 'order_id=' . $order['order_id'] . '&token=' . $token, true);
         $ajaxUrl = str_replace('&amp;', '&', $ajaxUrl);
 
         $allowed_to_value = array(
@@ -303,7 +517,15 @@ class BlockBee extends \Opencart\System\Engine\Controller
         if (!$order) {
             return;
         }
-        return $this->response->redirect($this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $order['order_id'], true));
+        $this->load->model('extension/blockbee/payment/blockbee');
+        $meta = json_decode((string)$this->model_extension_blockbee_payment_blockbee->getPaymentData($order['order_id']), true);
+        // Prefer the stored payment URL (already &amp;-decoded and carries the token).
+        if (is_array($meta) && !empty($meta['blockbee_payment_url'])) {
+            return $this->response->redirect($meta['blockbee_payment_url']);
+        }
+        $token = is_array($meta) ? (string)($meta['blockbee_token'] ?? '') : '';
+        $url = $this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $order['order_id'] . '&token=' . $token, true);
+        return $this->response->redirect(str_replace('&amp;', '&', $url));   // two params => decode &amp;
     }
 
     /**
@@ -360,9 +582,12 @@ class BlockBee extends \Opencart\System\Engine\Controller
         // Library
         require(DIR_EXTENSION . 'blockbee/system/library/blockbee.php');
 
-        $order = $this->isBlockbeeOrder(true);
+        // Don't leak ?token= via the Referer header.
+        $this->response->addHeader('Referrer-Policy: no-referrer');
 
-        if (!$order) {
+        $order = $this->isBlockbeeOrder(true);                 // keep true: paid/cancelled view needed
+
+        if (!$order || !$this->authorizeOrderAccess($order)) { // authorizeOrderAccess loads the model
             return false;
         }
 
@@ -397,9 +622,18 @@ class BlockBee extends \Opencart\System\Engine\Controller
             $blockbee_pending = 1;
         }
 
-        $counter_calc = (int)$metaData['blockbee_last_price_update'] + (int)$this->config->get('payment_blockbee_refresh_values') - time();
+        // Refresh ONLY this already-authorized order — not a global sweep.
+        $refresh_values = (int)$this->config->get('payment_blockbee_refresh_values');
+        $counter_calc = (int)$metaData['blockbee_last_price_update'] + $refresh_values - time();
         if (!$this->isOrderPaid($order) && $counter_calc <= 0) {
-            $this->cron(false);
+            $this->refreshOrder($order);
+            // refreshOrder() may have advanced last_price_update; recompute so the
+            // client gets the fresh remaining time, not the stale (<= 0) value that
+            // would make the countdown reset to ~0 instead of the full interval.
+            $fresh = json_decode((string)$this->model_extension_blockbee_payment_blockbee->getPaymentData($order['order_id']), true);
+            if (is_array($fresh) && isset($fresh['blockbee_last_price_update'])) {
+                $counter_calc = (int)$fresh['blockbee_last_price_update'] + $refresh_values - time();
+            }
         }
 
         if ($remaining_pending <= $min_tx && $remaining_pending > 0) {
@@ -420,7 +654,7 @@ class BlockBee extends \Opencart\System\Engine\Controller
             'order_history' => $history,
             'already_paid' => $currencySymbolLeft . $already_paid . $currencySymbolRight,
             'already_paid_fiat' => floatval($already_paid_fiat) <= 0 ? 0 : floatval($already_paid_fiat),
-            'counter' => (string)$counter_calc,
+            'counter' => (string)max(0, $counter_calc),
             'fiat_symbol_left' => $currencySymbolLeft,
             'fiat_symbol_right' => $currencySymbolRight,
         ];
@@ -436,190 +670,163 @@ class BlockBee extends \Opencart\System\Engine\Controller
             // Library
             require(DIR_EXTENSION . 'blockbee/system/library/blockbee.php');
         }
-
         $this->load->model('checkout/order');
         $this->load->model('extension/blockbee/payment/blockbee');
         $this->response->addHeader('Content-Type: application/json');
 
-        $order_timeout = (int) $this->config->get('payment_blockbee_order_cancelation_timeout');
-        $value_refresh = (int) $this->config->get('payment_blockbee_refresh_values');
-        $qrcode_size = (int) $this->config->get('payment_blockbee_qrcode_size');
-
-        $apiKey = $this->config->get('payment_blockbee_api_key');
+        // Gate the public route (CLI / secret / proxy-safe loopback).
+        if (!$this->isCronAuthorized()) {
+            http_response_code(403);
+            return $this->response->setOutput(json_encode(['status' => 'forbidden']));
+        }
 
         $response = $this->response->setOutput(json_encode(['status' => 'ok']));
 
+        $order_timeout = (int)$this->config->get('payment_blockbee_order_cancelation_timeout');
+        $value_refresh = (int)$this->config->get('payment_blockbee_refresh_values');
         if ($order_timeout === 0 && $value_refresh === 0) {
             return $response;
         }
 
         $orders = $this->model_extension_blockbee_payment_blockbee->getOrders();
-
         if (empty($orders)) {
             return $response;
         }
-
         foreach ($orders as $order) {
-
-            $order_id = $order['order_id'];
-
-            $currency = $order['currency_code'];
-
-            $metaData = json_decode($this->model_extension_blockbee_payment_blockbee->getPaymentData($order['order_id']), true);
-
-            if (!empty($metaData['blockbee_last_price_update'])) {
-                $last_price_update = $metaData['blockbee_last_price_update'];
-
-                $history = json_decode($metaData['blockbee_history'], true);
-
-                $min_tx = floatval($metaData['blockbee_min']);
-
-                $calc = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::calc_order($history, $metaData['blockbee_total'], floatval($metaData['blockbee_total_fiat']));
-
-                $remaining = $calc['remaining'];
-                $remaining_pending = $calc['remaining_pending'];
-                $already_paid = $calc['already_paid'];
-
-                if ($value_refresh !== 0 && $last_price_update + $value_refresh <= time()) {
-                    if ($remaining === $remaining_pending) {
-                        $blockbee_coin = $metaData['blockbee_currency'];
-
-                        $crypto_total = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_conversion($currency, $blockbee_coin, $metaData['blockbee_total_fiat'], $this->config->get('payment_blockbee_disable_conversion'), $this->config->get('payment_blockbee_api_key'));
-
-                        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_total', $crypto_total);
-
-                        $calc_cron = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::calc_order($history, $crypto_total, $metaData['blockbee_total_fiat']);
-
-                        $crypto_remaining_total = $calc_cron['remaining_pending'];
-
-                        if ($remaining_pending <= $min_tx && $remaining_pending > 0) {
-                            $qr_code_data_value = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_static_qrcode($metaData['blockbee_address'], $blockbee_coin, $min_tx, $apiKey, $qrcode_size);
-                        } else {
-                            $qr_code_data_value = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_static_qrcode($metaData['blockbee_address'], $blockbee_coin, $crypto_remaining_total, $apiKey, $qrcode_size);
-                        }
-
-                        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_qrcode_value', $qr_code_data_value['qr_code']);
-                    }
-
-                    $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_last_price_update', time());
-                }
-
-                // Compute age via the database's clock to avoid PHP/MariaDB
-                // timezone mismatches. `age_seconds` comes pre-computed in getOrders().
-                $age_seconds = isset($order['age_seconds']) ? (int)$order['age_seconds'] : (time() - strtotime($order['date_added']));
-                if ($order_timeout !== 0 && $age_seconds >= $order_timeout && $already_paid <= 0) {
-                    $this->model_checkout_order->addHistory($order['order_id'], 7);
-                    $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_canceled', '1');
-                }
-            }
+            $this->refreshOrder($order);
         }
-
         return $response;
     }
 
     public function callback()
     {
-        // Library
         require(DIR_EXTENSION . 'blockbee/system/library/blockbee.php');
+        $lib = '\\Opencart\\Extension\\BlockBee\\System\\Library\\BlockBeeHelper';
 
         $this->load->model('extension/blockbee/payment/blockbee');
-
-        // Verify webhook signature before touching any state.
-        // https://docs.blockbee.io/webhooks/verify-webhook-signature
-        $pubkey = $this->cache->get('blockbee.pubkey');
-        if (empty($pubkey)) {
-            $pubkey = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::fetch_pubkey();
-            if (!empty($pubkey)) {
-                $this->cache->set('blockbee.pubkey', $pubkey);
-            }
-        }
-
-        $signature = $_SERVER['HTTP_X_CA_SIGNATURE'] ?? '';
-        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-        $scheme = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? $scheme;
-        $host = $_SERVER['HTTP_X_FORWARDED_HOST'] ?? ($_SERVER['HTTP_HOST'] ?? '');
-        $signed_url = $scheme . '://' . $host . ($_SERVER['REQUEST_URI'] ?? '');
-
-        if (empty($pubkey) || !\Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::verify_signature($signed_url, $signature, $pubkey)) {
-            http_response_code(403);
-            die('invalid signature');
-        }
-
-        $data = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::process_callback($_GET);
-
         $this->load->model('checkout/order');
 
+        $data = $lib::process_callback($_GET);
+
+        // Resolve the order from the deposit address; fall back to the signed order_id.
+        $bound = $this->model_extension_blockbee_payment_blockbee->getOrderByAddress((string)($data['address_in'] ?? ''));
+        $order_id = !empty($bound['order_id']) ? (int)$bound['order_id'] : (int)($data['order_id'] ?? 0);
+
+        $metaRaw = $this->model_extension_blockbee_payment_blockbee->getPaymentData($order_id);
+        if (empty($metaRaw)) { http_response_code(403); die('unknown order'); }
+        $metaData = json_decode($metaRaw, true);
+        if (!is_array($metaData)) { http_response_code(403); die('bad order data'); }
+
+        // Verify signature over a SERVER-FIXED reconstructed URL (no header trust).
+        $pubkey = $this->cache->get('blockbee.pubkey');
+        if (empty($pubkey)) {
+            $pubkey = $lib::fetch_pubkey();
+            if (!empty($pubkey)) { $this->cache->set('blockbee.pubkey', $pubkey); }
+        }
+        $base = !empty($metaData['blockbee_callback_url'])
+            ? $metaData['blockbee_callback_url']
+            : (defined('HTTPS_SERVER') ? HTTPS_SERVER : (defined('HTTP_SERVER') ? HTTP_SERVER : ''));
+        $signed_url = $lib::build_signed_url($base, $_SERVER['REQUEST_URI'] ?? '');
+        $signature  = $_SERVER['HTTP_X_CA_SIGNATURE'] ?? '';
+        if (empty($pubkey) || $signed_url === '' || !$lib::verify_signature($signed_url, $signature, $pubkey)) {
+            http_response_code(403); die('invalid signature');
+        }
+
+        // Per-order nonce, BEFORE any state change (empty==empty passes for legacy rows).
+        if (!hash_equals((string)($metaData['blockbee_nonce'] ?? ''), (string)($data['nonce'] ?? ''))) {
+            http_response_code(403); die('invalid nonce');
+        }
+
+        // Address binding (current or a prior re-selected address) + order_id consistency.
+        $cb_addr     = strtolower(trim((string)($data['address_in'] ?? '')));
+        $stored_addr = strtolower(trim((string)($metaData['blockbee_address'] ?? '')));
+        $addr_ok = ($cb_addr !== '' && $stored_addr !== '' && hash_equals($stored_addr, $cb_addr));
+        if (!$addr_ok && $cb_addr !== '' && !empty($metaData['blockbee_prev_addresses']) && is_array($metaData['blockbee_prev_addresses'])) {
+            foreach ($metaData['blockbee_prev_addresses'] as $prev) {
+                if (hash_equals(strtolower(trim((string)$prev)), $cb_addr)) { $addr_ok = true; break; }
+            }
+        }
+        if (!$addr_ok) { http_response_code(403); die('address mismatch'); }
+        if ((int)($data['order_id'] ?? 0) !== $order_id) {
+            http_response_code(403); die('order mismatch');
+        }
+
+        $order = $this->model_checkout_order->getOrder($order_id);
+
+        if (($data['coin'] ?? null) !== ($metaData['blockbee_currency'] ?? null)) {
+            die('*ok*');
+        }
+        if ($this->isOrderPaid($order) || (!empty($metaData['blockbee_paid']) && (string)$metaData['blockbee_paid'] === '1')) {
+            die('*ok*');
+        }
+
+        // Required total must be positive.
+        if (!$lib::is_positive_number($metaData['blockbee_total'] ?? null)) {
+            http_response_code(403); die('total not set');
+        }
+
         $apiKey = $this->config->get('payment_blockbee_api_key');
-
-        $order = $this->model_checkout_order->getOrder((int)$data['order_id']);
-
-        $metaData = json_decode($this->model_extension_blockbee_payment_blockbee->getPaymentData($order['order_id']), true);
-
-        if ($data["coin"] !== $metaData['blockbee_currency']) {
-            die("*ok*");
-        }
-
-        if ($this->isOrderPaid($order)) {
-            die("*ok*");
-        }
-
         $disable_conversion = $this->config->get('payment_blockbee_disable_conversion');
-
         $qrcode_size = $this->config->get('payment_blockbee_qrcode_size');
 
-        $paid = $data['value_coin'];
-
+        $paid   = $data['value_coin'];
         $min_tx = floatval($metaData['blockbee_min']);
+        $uuid   = (string)($data['uuid'] ?? '');
+        if ($uuid === '') { http_response_code(403); die('missing uuid'); }
 
-        $history = json_decode($metaData['blockbee_history'], true);
-
-        if (empty($history[$data['uuid']])) {
-            $fiat_conversion = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_conversion($metaData['blockbee_currency'], $order['currency_code'], $paid, $disable_conversion, $apiKey);
-
-            $history[$data['uuid']] = [
-                'timestamp' => time(),
-                'value_paid' => \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::sig_fig($paid, 6),
+        // Build the entry, then atomic per-uuid merge.
+        $history = json_decode($metaData['blockbee_history'], true) ?: [];
+        if (empty($history[$uuid])) {
+            $fiat_conversion = $lib::get_conversion($metaData['blockbee_currency'], $order['currency_code'], $paid, $disable_conversion, $apiKey);
+            $entry = [
+                'timestamp'       => time(),
+                'value_paid'      => $lib::sig_fig($paid, 6),
                 'value_paid_fiat' => $fiat_conversion,
-                'pending' => $data['pending']
+                'pending'         => $data['pending'],
             ];
         } else {
-            $history[$data['uuid']]['pending'] = $data['pending'];
+            $entry = ['pending' => $data['pending']];
         }
+        $this->model_extension_blockbee_payment_blockbee->addHistoryEntry($order_id, $uuid, $entry);
 
-        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order['order_id'], 'blockbee_history', json_encode($history));
-
-        $metaData = json_decode($this->model_extension_blockbee_payment_blockbee->getPaymentData($order['order_id']), true);
-
-        $history = json_decode($metaData['blockbee_history'], true);
-
-        $calc = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::calc_order($history, $metaData['blockbee_total'], $metaData['blockbee_total_fiat']);
-
-        $remaining = $calc['remaining'];
+        // Re-read merged state.
+        $metaData = json_decode($this->model_extension_blockbee_payment_blockbee->getPaymentData($order_id), true);
+        $history  = json_decode($metaData['blockbee_history'], true) ?: [];
+        $calc = $lib::calc_order($history, $metaData['blockbee_total'], $metaData['blockbee_total_fiat']);
+        $remaining         = $calc['remaining'];
         $remaining_pending = $calc['remaining_pending'];
 
         if ($remaining_pending <= 0) {
             if ($remaining <= 0) {
-                $processing_state = 2;
-                $this->model_checkout_order->addHistory($order['order_id'], $processing_state);
-                $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order['order_id'], 'blockbee_txid', $data['txid_in']);
+                // Mark paid at most once; release the claim if side effects fail.
+                if ($this->model_extension_blockbee_payment_blockbee->claimPaidTransition($order_id)) {
+                    try {
+                        $this->model_checkout_order->addHistory($order_id, 2);
+                        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_txid', $data['txid_in']);
+                    } catch (\Throwable $e) {
+                        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_paid', '0');
+                        http_response_code(500); die('processing error');   // provider will retry
+                    }
+                }
             }
             die('*ok*');
         }
 
         if ($remaining_pending <= $min_tx) {
-            $qrcode_conv = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_static_qrcode($metaData['blockbee_address'], $metaData['blockbee_currency'], $min_tx, $apiKey, $qrcode_size)['qr_code'];
+            $qrcode_conv = $lib::get_static_qrcode($metaData['blockbee_address'], $metaData['blockbee_currency'], $min_tx, $apiKey, $qrcode_size)['qr_code'];
         } else {
-            $qrcode_conv = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_static_qrcode($metaData['blockbee_address'], $metaData['blockbee_currency'], $remaining_pending, $apiKey, $qrcode_size)['qr_code'];
+            $qrcode_conv = $lib::get_static_qrcode($metaData['blockbee_address'], $metaData['blockbee_currency'], $remaining_pending, $apiKey, $qrcode_size)['qr_code'];
         }
-
-        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order['order_id'], 'blockbee_qrcode_value', $qrcode_conv);
-
-        die("*ok*");
+        $this->model_extension_blockbee_payment_blockbee->updatePaymentData($order_id, 'blockbee_qrcode_value', $qrcode_conv);
+        die('*ok*');
     }
 
     function order_pay_button(&$route, &$data, &$output)
     {
-        $order_id = $this->request->get['order_id'];
+        $order_id = (int)($this->request->get['order_id'] ?? 0);
+        if ($order_id <= 0) {
+            return;
+        }
 
         $this->load->model('extension/blockbee/payment/blockbee');
         $this->load->model('checkout/order');
@@ -635,7 +842,7 @@ class BlockBee extends \Opencart\System\Engine\Controller
 
         if ((int)$orderObj->blockbee_canceled === 0 && isset($orderObj->blockbee_payment_url) && (int)$orderFetch['order_status_id'] === 1) {
             $data['button_continue'] = 'Pay Order';
-            $data['continue'] = $orderObj->blockbee_payment_url;
+            $data['continue'] = $orderObj->blockbee_payment_url;   // already &amp;-decoded + token
         }
     }
 }

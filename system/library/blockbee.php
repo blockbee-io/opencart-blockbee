@@ -304,8 +304,38 @@ class BlockBeeHelper
     }
 
 
+    /**
+     * Rebuild the signed-URL origin from a server-fixed base.
+     * The origin (scheme://host[:port]) is taken from the callback URL the
+     * plugin registered with the provider (never from request headers); the
+     * path+query come verbatim from the received REQUEST_URI.
+     */
+    public static function build_signed_url(string $callback_url, string $request_uri): string
+    {
+        $parts = parse_url($callback_url);
+        if ($parts === false || empty($parts['scheme']) || empty($parts['host'])) {
+            return '';
+        }
+        $origin = $parts['scheme'] . '://' . $parts['host'];
+        if (!empty($parts['port'])) {
+            $origin .= ':' . $parts['port'];
+        }
+        return $origin . $request_uri;
+    }
+
+    /**
+     * Numeric-and-positive guard for totals/conversions.
+     */
+    public static function is_positive_number($value): bool
+    {
+        return is_numeric($value) && (float)$value > 0;
+    }
+
     public static function sig_fig($value, $digits)
     {
+        if (!is_numeric($value)) {
+            return '0';                       // was: (string)null => '' => broke bcsub()
+        }
         $value = (string) $value;
         if (strpos($value, '.') !== false) {
             if ($value[0] != '-') {
@@ -320,6 +350,17 @@ class BlockBeeHelper
 
     public static function calc_order($history, $total, $total_fiat): array
     {
+        // A missing/invalid required total must be NOT-payable, never 0.
+        if (!is_numeric($total) || (float)$total <= 0) {
+            return [
+                'already_paid'      => 0.0,
+                'already_paid_fiat' => 0.0,
+                'remaining'         => 1.0,   // positive sentinel => never <= 0 => never auto-paid
+                'remaining_pending' => 1.0,
+                'remaining_fiat'    => is_numeric($total_fiat) ? floatval($total_fiat) : 0.0,
+            ];
+        }
+
         $already_paid = 0;
         $already_paid_fiat = 0;
         $remaining = $total;
@@ -328,24 +369,24 @@ class BlockBeeHelper
 
         if (!empty($history)) {
             foreach ($history as $uuid => $item) {
-                if ((int)$item['pending'] === 0) {
-                    $remaining = bcsub(BlockBeeHelper::sig_fig($remaining, 6), $item['value_paid'], 8);
+                $vp  = BlockBeeHelper::sig_fig($item['value_paid'] ?? '0', 8);
+                $vpf = BlockBeeHelper::sig_fig($item['value_paid_fiat'] ?? '0', 8);
+                if ((int)($item['pending'] ?? 1) === 0) {
+                    $remaining = bcsub(BlockBeeHelper::sig_fig($remaining, 6), $vp, 8);
                 }
-
-                $remaining_pending = bcsub(BlockBeeHelper::sig_fig($remaining_pending, 6), $item['value_paid'], 8);
-                $remaining_fiat = bcsub(BlockBeeHelper::sig_fig($remaining_fiat, 6), $item['value_paid_fiat'], 8);
-
-                $already_paid = bcadd(BlockBeeHelper::sig_fig($already_paid, 6), $item['value_paid'], 8);
-                $already_paid_fiat = bcadd(BlockBeeHelper::sig_fig($already_paid_fiat, 6), $item['value_paid_fiat'], 8);
+                $remaining_pending = bcsub(BlockBeeHelper::sig_fig($remaining_pending, 6), $vp, 8);
+                $remaining_fiat    = bcsub(BlockBeeHelper::sig_fig($remaining_fiat, 6), $vpf, 8);
+                $already_paid      = bcadd(BlockBeeHelper::sig_fig($already_paid, 6), $vp, 8);
+                $already_paid_fiat = bcadd(BlockBeeHelper::sig_fig($already_paid_fiat, 6), $vpf, 8);
             }
         }
 
         return [
-            'already_paid' => floatval($already_paid),
+            'already_paid'      => floatval($already_paid),
             'already_paid_fiat' => floatval($already_paid_fiat),
-            'remaining' => floatval($remaining),
+            'remaining'         => floatval($remaining),
             'remaining_pending' => floatval($remaining_pending),
-            'remaining_fiat' => floatval($remaining_fiat)
+            'remaining_fiat'    => floatval($remaining_fiat),
         ];
     }
 

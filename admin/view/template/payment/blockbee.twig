@@ -568,6 +568,14 @@
                                     <small class="text-muted form-text">{{ api_key_info }}</small>
                                 </div>
                             </div>
+                            <div class="row mb-3">
+                                <label class="col-sm-2 col-form-label" for="blockbee_cron_secret">{{ entry_cron_secret }}</label>
+                                <div class="col-sm-10">
+                                    <input type="text" name="payment_blockbee_cron_secret" id="blockbee_cron_secret"
+                                           value="{{ payment_blockbee_cron_secret }}" class="form-control" autocomplete="off"/>
+                                    <small class="text-muted form-text">{{ help_cron_secret }}</small>
+                                </div>
+                            </div>
                             <div class="row mb-3 justify-content-center">
                                 <div class="col-12 text-center" style="margin-bottom: 20px">
                                     <label class="control-label text-center" style="float: none !important;">

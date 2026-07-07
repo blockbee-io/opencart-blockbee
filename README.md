@@ -113,8 +113,10 @@ Some features require a cronjob to run every 1 minute. Without it, conversion ra
 Configure your hosting to call:
 
 ```
-https://YOUR-DOMAIN/index.php?route=extension/blockbee/payment/blockbee|cron
+https://YOUR-DOMAIN/index.php?route=extension/blockbee/payment/blockbee|cron&secret=YOUR_CRON_SECRET
 ```
+
+Over HTTP from a non-loopback host (or from any host behind a reverse proxy) a matching **Cron secret** is required — set it in the BlockBee admin settings and append it as `&secret=YOUR_CRON_SECRET`. CLI (`php index.php ...`) and direct-loopback-without-proxy cron are exempt and need no secret.
 
 Most shared hosts expose this via a cPanel "Cron Jobs" section. A 1-minute schedule (`* * * * *`) is recommended.
 
@@ -167,6 +169,9 @@ The easiest and fastest way is via our live chat on our [website](https://blockb
 * New admin warning for unsupported store currencies.
 * Various bugfixes and improvements.
 * Added translations
+
+#### 1.2.0
+* Bugfixes and security improvements
 
 ### Upgrade Notice
 * No breaking changes.

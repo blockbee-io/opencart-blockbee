@@ -1,7 +1,8 @@
 {
   "name": "BlockBee Payment Module",
   "code": "blockbee",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "BlockBee",
-  "link": "https://blockbee.io"
+  "link": "https://blockbee.io",
+  "compatibility": "4.0.0.0-4.1.0.3"
 }

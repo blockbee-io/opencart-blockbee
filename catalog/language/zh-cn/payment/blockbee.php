@@ -18,6 +18,7 @@ $_['value_minim']  = '金额过低，最低为';
 $_['error_coin']  = '未选择付款的加密货币';
 $_['error_apikey']  = '店主信息不足以完成付款';
 $_['error_adress']  = '此加密货币目前无法用于付款';
+$_['error_conversion']  = '此时无法确定付款金额，请重试。';
 
 $_['button_pay'] = '立即付款';
 
