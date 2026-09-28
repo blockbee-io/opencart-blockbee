@@ -144,18 +144,16 @@ class BlockBee extends \Opencart\System\Engine\Controller
             $this->load->model('localisation/country');
             $this->load->model('checkout/order');
 
-            $data['title'] = $this->config->get('payment_blockbee_title');
+            $data['title'] = $this->config->get('payment_blockbee_title') ?: $this->language->get('text_title');
 
             $data['cryptocurrencies'] = array();
 
             $order = $this->model_checkout_order->getOrder($this->session->data['order_id']);
 
-            $order_total = floatval($order['total']);
+            $coin_cache = json_decode(html_entity_decode((string)$this->config->get('payment_blockbee_cryptocurrencies_array_cache'), ENT_QUOTES | ENT_HTML5, 'UTF-8'), true);
 
-            $apiKey = $this->config->get('payment_blockbee_api_key');
-
-            foreach ($this->config->get('payment_blockbee_cryptocurrencies') as $selected) {
-                foreach (json_decode(html_entity_decode($this->config->get('payment_blockbee_cryptocurrencies_array_cache'), ENT_QUOTES | ENT_HTML5, 'UTF-8'), true) as $token => $coin) {
+            foreach ((array)$this->config->get('payment_blockbee_cryptocurrencies') as $selected) {
+                foreach ((array)$coin_cache as $token => $coin) {
                     if ($selected === $token) {
                         $data['cryptocurrencies'] += [
                             $token => $coin,
@@ -164,46 +162,78 @@ class BlockBee extends \Opencart\System\Engine\Controller
                 }
             }
 
-            // Fee
-            $fee = $this->config->get('payment_blockbee_fees');
-            $blockchain_fee = $this->config->get('payment_blockbee_blockchain_fees');
             $currency = $order['currency_code'];
             $currencySymbolLeft = $this->model_localisation_currency->getCurrencies()[$order['currency_code']]['symbol_left'];
             $currencySymbolRight = $this->model_localisation_currency->getCurrencies()[$order['currency_code']]['symbol_right'];
             $data['symbol_left'] = $currencySymbolLeft;
             $data['symbol_right'] = $currencySymbolRight;
-            $selected = $this->session->data['blockbee_selected'] ?? '';
-            $blockbeeFee = 0;
-
-            if ($selected) {
-                if ($fee !== 0) {
-                    $blockbeeFee += floatval($fee) * $order_total;
-                }
-
-                if ($blockchain_fee) {
-                    $estimate = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_estimate($this->session->data['blockbee_selected'], $apiKey);
-                    if (is_object($estimate) && isset($estimate->$currency)) {
-                        $blockbeeFee += floatval($estimate->$currency);
-                    } elseif (is_object($estimate) && isset($estimate->USD)) {
-                        $blockbeeFee += floatval($this->currency->convert($estimate->USD, 'USD', $currency));
-                    }
-                }
+            // Default to the first coin, so the fee matches what's checked and the
+            // customer can't confirm with nothing selected.
+            $selected = (string)($this->session->data['blockbee_selected'] ?? '');
+            if (!isset($data['cryptocurrencies'][$selected])) {
+                $selected = (string)(array_key_first($data['cryptocurrencies']) ?? '');
             }
 
-            $data['fee'] = $fee;
-            $data['blockchain_fee'] = $blockchain_fee;
-            $data['blockbee_fee'] = $this->currency->format($blockbeeFee, $currency, 1.00000, false);
-            $data['total'] = $this->currency->format($order_total + $blockbeeFee, $currency, 1.00000, false);
+            $amounts = $this->orderAmounts($order, $selected);
+
+            $data['show_fee'] = $this->config->get('payment_blockbee_blockchain_fees') || (float)$this->config->get('payment_blockbee_fees') > 0;
+            $data['fee_text'] = $this->currency->format($amounts['fee'], $currency, 1.00000);
+            $data['total_text'] = $this->currency->format($amounts['total'], $currency, 1.00000);
             $data['language'] = $this->config->get('config_language');
             $data['selected'] = $selected;
 
-            $this->session->data['blockbee_fee'] = round($blockbeeFee, 2);
+            // Relative like core's own checkout calls. '|' works on every OC 4 version:
+            // natively before 4.0.2, and core rewrites it to '.' from 4.0.2 on.
+            $language = '&language=' . $this->config->get('config_language');
+            $data['select_url'] = 'index.php?route=extension/blockbee/payment/blockbee|sel_crypto' . $language;
+            $data['confirm_url'] = 'index.php?route=extension/blockbee/payment/blockbee|confirm' . $language;
+            $data['refresh_url'] = 'index.php?route=checkout/confirm|confirm' . $language;
+
+            $this->session->data['blockbee_fee'] = $amounts['fee'];
 
             $this->load->model('checkout/order');
 
             return $this->load->view('extension/blockbee/payment/blockbee', $data);
         }
         return false;
+    }
+
+    /**
+     * What the customer sees at checkout and is asked to pay, in the order's
+     * currency. OpenCart stores order totals in the store's default currency, so
+     * convert with the rate saved on the order first: formatting the raw total
+     * with a rate of 1 charged a EUR customer the USD figure in EUR.
+     */
+    private function orderAmounts(array $order, string $coin): array
+    {
+        $currency = (string)$order['currency_code'];
+        $order_total = (float)$this->currency->format((float)$order['total'], $currency, (float)($order['currency_value'] ?? 0), false);
+
+        $fee = 0.0;
+
+        if ($coin !== '') {
+            $fee_rate = (float)$this->config->get('payment_blockbee_fees');
+            if ($fee_rate > 0) {
+                $fee += $fee_rate * $order_total;
+            }
+
+            if ($this->config->get('payment_blockbee_blockchain_fees')) {
+                $estimate = \Opencart\Extension\BlockBee\System\Library\BlockBeeHelper::get_estimate($coin, $this->config->get('payment_blockbee_api_key'));
+                if (is_object($estimate) && isset($estimate->$currency)) {
+                    $fee += (float)$estimate->$currency;
+                } elseif (is_object($estimate) && isset($estimate->USD)) {
+                    $fee += $this->currency->convert((float)$estimate->USD, 'USD', $currency);
+                }
+            }
+        }
+
+        // Already in the order's currency: a rate of 1 only rounds to its decimals.
+        $fee = (float)$this->currency->format($fee, $currency, 1.00000, false);
+
+        return [
+            'fee'   => $fee,
+            'total' => (float)$this->currency->format($order_total + $fee, $currency, 1.00000, false),
+        ];
     }
 
     public function sel_crypto()
@@ -227,9 +257,11 @@ class BlockBee extends \Opencart\System\Engine\Controller
         $json = [];
         $err_coin = '';
 
+        $ob_level = ob_get_level();
+        ob_start();
+
         if (!$this->config->get('payment_blockbee_status')) {
-            $this->response->addHeader('Content-Type: application/json');
-            $this->response->setOutput(json_encode($json));
+            $this->sendJson($json, $ob_level);
             return;
         }
 
@@ -240,12 +272,11 @@ class BlockBee extends \Opencart\System\Engine\Controller
         $order_info = $this->model_checkout_order->getOrder($order_id);
         if (empty($order_info)) {
             $json['error']['warning'] = sprintf($this->language->get('error_payment'), $this->language->get('error_coin'));
-            $this->response->addHeader('Content-Type: application/json');
-            $this->response->setOutput(json_encode($json));
+            $this->sendJson($json, $ob_level);
             return;
         }
 
-        // Idempotency: never clobber a paid / partially-paid order.
+        // Never clobber a paid / partially-paid order.
         $prevAddresses = [];
         $existingRaw = $this->model_extension_blockbee_payment_blockbee->getPaymentData($order_id);
         if (!empty($existingRaw)) {
@@ -253,12 +284,14 @@ class BlockBee extends \Opencart\System\Engine\Controller
             $hist = json_decode($em['blockbee_history'] ?? '[]', true) ?: [];
             $alreadyPaid = $this->isOrderPaid($order_info) || (!empty($em['blockbee_paid']) && (string)$em['blockbee_paid'] === '1');
             $hasPayments = is_array($hist) && count($hist) > 0;
-            if ($alreadyPaid || $hasPayments) {
+            // Partly paid and still pending: send the customer back to finish paying it.
+            // pay() only opens pending orders, so a paid or cancelled one goes on to the
+            // stale-order check below and the current cart gets a new order.
+            if ($hasPayments && !$alreadyPaid && (int)$order_info['order_status_id'] === (int)$this->config->get('payment_blockbee_order_status_id')) {
                 $redir = $em['blockbee_payment_url']
                     ?? $this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $order_id . '&token=' . ($em['blockbee_token'] ?? ''), true);
                 $json['redirect'] = str_replace('&amp;', '&', $redir);
-                $this->response->addHeader('Content-Type: application/json');
-                $this->response->setOutput(json_encode($json));
+                $this->sendJson($json, $ob_level);
                 return;
             }
             // Unpaid + empty history => re-selection allowed. Preserve prior address(es)
@@ -268,6 +301,21 @@ class BlockBee extends \Opencart\System\Engine\Controller
                 $prevAddresses[] = (string)$em['blockbee_address'];
             }
             $prevAddresses = array_values(array_unique(array_filter($prevAddresses, 'strlen')));
+        }
+
+        // OpenCart's checkout only updates the order in the session while it has no
+        // status. Once it has one, cart, totals and payment method stay frozen. That
+        // happens after an earlier confirm here, or on OpenCart 4.1.0.x before 4.1.0.4,
+        // whose editOrder() voids the order the first time the confirm section reloads.
+        // Charging such an order would use stale totals, and pay() would reject it if
+        // it was frozen with another payment method. Drop it from the session instead:
+        // the checkout script reloads the confirm section, which makes OpenCart create
+        // a fresh order, then confirms again.
+        if (!in_array($this->orderPaymentCode($order_info), ['blockbee.blockbee', 'blockbee'], true) || (int)$order_info['order_status_id'] !== 0) {
+            unset($this->session->data['order_id']);
+            $json['refresh'] = true;
+            $this->sendJson($json, $ob_level);
+            return;
         }
 
         $apiKey = $this->config->get('payment_blockbee_api_key');
@@ -292,23 +340,9 @@ class BlockBee extends \Opencart\System\Engine\Controller
             $currency = $order_info['currency_code'];
 
             // Server-side fee (never trust session['blockbee_fee']).
-            $order_total = floatval($order_info['total']);
-            $fee = $this->config->get('payment_blockbee_fees');
-            $blockchain_fee = $this->config->get('payment_blockbee_blockchain_fees');
-            $blockbeeFee = 0;
-            if ($fee !== 0) {
-                $blockbeeFee += floatval($fee) * $order_total;
-            }
-            if ($blockchain_fee) {
-                $estimate = $lib::get_estimate($selected, $apiKey);
-                if (is_object($estimate) && isset($estimate->$currency)) {
-                    $blockbeeFee += floatval($estimate->$currency);
-                } elseif (is_object($estimate) && isset($estimate->USD)) {
-                    $blockbeeFee += floatval($this->currency->convert($estimate->USD, 'USD', $currency));
-                }
-            }
-            $cryptoFee = round($blockbeeFee, 2);
-            $total = $this->currency->format($order_info['total'] + $cryptoFee, $currency, 1.00000, false);
+            $amounts = $this->orderAmounts($order_info, $selected);
+            $cryptoFee = $amounts['fee'];
+            $total = $amounts['total'];
 
             $info  = $lib::get_info($selected, false, $apiKey);
             $minTx = floatval($info->minimum_transaction_coin ?? 0);
@@ -383,8 +417,7 @@ class BlockBee extends \Opencart\System\Engine\Controller
             $json['error']['warning'] = sprintf($this->language->get('error_payment'), $err_coin);
         }
 
-        $this->response->addHeader('Content-Type: application/json');
-        $this->response->setOutput(json_encode($json));
+        $this->sendJson($json, $ob_level);
     }
 
     public function isBlockbeeOrder($status = false)
@@ -398,10 +431,7 @@ class BlockBee extends \Opencart\System\Engine\Controller
             $this->load->model('checkout/order');
             $order = $this->model_checkout_order->getOrder($order_id);
 
-            // OpenCart 4.x: getOrder() auto-decodes payment_method JSON.
-            // The stored code is the full `<method>.<option>` form.
-            $payment_code = $order['payment_method']['code'] ?? '';
-            if ($order && $payment_code !== 'blockbee.blockbee') {
+            if ($order && !in_array($this->orderPaymentCode($order), ['blockbee.blockbee', 'blockbee'], true)) {
                 $order = false;
             }
 
@@ -433,6 +463,13 @@ class BlockBee extends \Opencart\System\Engine\Controller
 
         if (!$order || !$this->authorizeOrderAccess($order)) {
             $this->response->redirect($this->url->link('common/home', '', true));
+        }
+
+        // This page takes the place of checkout/success, so finish the checkout the
+        // way it does. The payment link and status checks carry the order's token, so
+        // the page keeps working without the session.
+        if ((int)($this->session->data['order_id'] ?? 0) === (int)$order['order_id']) {
+            $this->finishCheckout();
         }
 
         $this->load->model('localisation/currency');
@@ -472,8 +509,18 @@ class BlockBee extends \Opencart\System\Engine\Controller
         $conversion_timer = ((int)$metaData['blockbee_last_price_update'] + (int)$this->config->get('payment_blockbee_refresh_values')) - time();
         $cancel_timer = (int)$metaData['blockbee_order_timestamp'] + (int)$this->config->get('payment_blockbee_order_cancelation_timeout') - time();
 
+        // Absolute, like core's <base href>, so themes that drop <base> still load
+        // the assets. The file time busts browser caches when a file changes.
+        $store_url = $this->config->get('config_url');
+        $asset_url = function (string $path) use ($store_url): string {
+            $file = DIR_EXTENSION . 'blockbee/' . $path;
+            return $store_url . 'extension/blockbee/' . $path . '?v=' . (is_file($file) ? filemtime($file) : 0);
+        };
+
         $params = [
-            'module_path' => HTTP_SERVER . 'extension/blockbee/catalog/view/image/',
+            'script_url' => $asset_url('catalog/view/javascript/js/blockbee_script.js'),
+            'style_url' => $asset_url('catalog/view/javascript/css/blockbee_style.css'),
+            'module_path' => $store_url . 'extension/blockbee/catalog/view/image/',
             'header' => $this->load->controller('common/header'),
             'footer' => $this->load->controller('common/footer'),
             'currency_symbol_left' => $currencySymbolLeft,
@@ -487,7 +534,7 @@ class BlockBee extends \Opencart\System\Engine\Controller
             'qr_code' => $metaData['blockbee_qrcode'],
             'qr_code_value' => $metaData['blockbee_qrcode_value'],
             'show_branding' => $this->config->get('payment_blockbee_branding'),
-            'branding_logo' => HTTP_SERVER . 'extension/blockbee/catalog/view/image/payment.png',
+            'branding_logo' => $store_url . 'extension/blockbee/catalog/view/image/payment.png',
             'qr_code_setting' => $this->config->get('payment_blockbee_qrcode'),
             'order_cancelation_timeout' => $this->config->get('payment_blockbee_order_cancelation_timeout'),
             'refresh_value_interval' => $this->config->get('payment_blockbee_refresh_values'),
@@ -504,31 +551,6 @@ class BlockBee extends \Opencart\System\Engine\Controller
     }
 
     /**
-     * Fallback redirect for customers landing on /checkout/success directly
-     * (e.g., back-button or bookmarked link). Primary flow redirects from
-     * confirm() straight to the pay page, so this rarely fires.
-     */
-    public function after_purchase(&$route, &$data, &$output)
-    {
-        if (!$this->config->get('payment_blockbee_status')) {
-            return;
-        }
-        $order = $this->isBlockbeeOrder();
-        if (!$order) {
-            return;
-        }
-        $this->load->model('extension/blockbee/payment/blockbee');
-        $meta = json_decode((string)$this->model_extension_blockbee_payment_blockbee->getPaymentData($order['order_id']), true);
-        // Prefer the stored payment URL (already &amp;-decoded and carries the token).
-        if (is_array($meta) && !empty($meta['blockbee_payment_url'])) {
-            return $this->response->redirect($meta['blockbee_payment_url']);
-        }
-        $token = is_array($meta) ? (string)($meta['blockbee_token'] ?? '') : '';
-        $url = $this->url->link('extension/blockbee/payment/blockbee|pay', 'order_id=' . $order['order_id'] . '&token=' . $token, true);
-        return $this->response->redirect(str_replace('&amp;', '&', $url));   // two params => decode &amp;
-    }
-
-    /**
      * Sends the payment-instructions email with the link back to the pay page.
      * Called from confirm() after payment data is persisted.
      * Silently fails if SMTP is not configured.
@@ -536,13 +558,33 @@ class BlockBee extends \Opencart\System\Engine\Controller
     private function sendPaymentInstructionsEmail(array $order, array $metaData, string $paymentURL): void
     {
         try {
-            $mail = new \Opencart\System\Library\Mail($this->config->get('config_mail_engine'));
-            $mail->parameter = $this->config->get('config_mail_parameter');
-            $mail->smtp_hostname = $this->config->get('config_mail_smtp_hostname');
-            $mail->smtp_username = $this->config->get('config_mail_smtp_username');
-            $mail->smtp_password = html_entity_decode($this->config->get('config_mail_smtp_password'), ENT_QUOTES, 'UTF-8');
-            $mail->smtp_port = $this->config->get('config_mail_smtp_port');
-            $mail->smtp_timeout = $this->config->get('config_mail_smtp_timeout');
+            $mail_option = [
+                'parameter'     => $this->config->get('config_mail_parameter'),
+                'smtp_hostname' => $this->config->get('config_mail_smtp_hostname'),
+                'smtp_username' => $this->config->get('config_mail_smtp_username'),
+                'smtp_password' => html_entity_decode((string)$this->config->get('config_mail_smtp_password'), ENT_QUOTES, 'UTF-8'),
+                'smtp_port'     => $this->config->get('config_mail_smtp_port'),
+                'smtp_timeout'  => $this->config->get('config_mail_smtp_timeout'),
+            ];
+
+            // OC 4.0.2+ takes options in the constructor. Setting them as properties
+            // there is a PHP 8.2+ deprecation, which OpenCart echoes into (or redirects
+            // away from) the confirm() JSON response. Older versions read properties.
+            if (version_compare(VERSION, '4.0.2.0', '>=')) {
+                $mail = new \Opencart\System\Library\Mail($this->config->get('config_mail_engine'), $mail_option);
+            } else {
+                $mail = new \Opencart\System\Library\Mail($this->config->get('config_mail_engine'));
+                // PHP 8.2+ flags these dynamic properties, but they're the only API
+                // these versions have. Mute just that while setting them.
+                set_error_handler(static fn() => true, E_DEPRECATED);
+                try {
+                    foreach ($mail_option as $key => $value) {
+                        $mail->$key = $value;
+                    }
+                } finally {
+                    restore_error_handler();
+                }
+            }
 
             $coin = strtoupper($metaData['blockbee_currency'] ?? '');
             $subject = sprintf($this->language->get('order_subject'), $order['order_id'], $coin);
@@ -585,10 +627,14 @@ class BlockBee extends \Opencart\System\Engine\Controller
         // Don't leak ?token= via the Referer header.
         $this->response->addHeader('Referrer-Policy: no-referrer');
 
+        $ob_level = ob_get_level();
+        ob_start();
+
         $order = $this->isBlockbeeOrder(true);                 // keep true: paid/cancelled view needed
 
         if (!$order || !$this->authorizeOrderAccess($order)) { // authorizeOrderAccess loads the model
-            return false;
+            $this->sendJson(['error' => 'not_found'], $ob_level);
+            return;
         }
 
         $this->load->model('extension/blockbee/payment/blockbee');
@@ -652,16 +698,49 @@ class BlockBee extends \Opencart\System\Engine\Controller
             'coin' => strtoupper($metaData['blockbee_currency']),
             'show_min_fee' => $showMinFee,
             'order_history' => $history,
-            'already_paid' => $currencySymbolLeft . $already_paid . $currencySymbolRight,
+            'already_paid' => $already_paid,   // crypto amount: no fiat symbols
             'already_paid_fiat' => floatval($already_paid_fiat) <= 0 ? 0 : floatval($already_paid_fiat),
             'counter' => (string)max(0, $counter_calc),
             'fiat_symbol_left' => $currencySymbolLeft,
             'fiat_symbol_right' => $currencySymbolRight,
         ];
 
-        $this->response->addHeader('Content-Type: application/json');
+        $this->sendJson($data, $ob_level);
+    }
 
-        return $this->response->setOutput(json_encode($data));
+    // OpenCart echoes PHP notices straight into the response when "Display errors"
+    // is on. Drop anything printed since $ob_level so the browser can parse the JSON.
+    // (With it off, 4.0.x-4.1.0.3 redirect instead; only notice-free code helps there.)
+    private function sendJson(array $json, int $ob_level): void
+    {
+        while (ob_get_level() > $ob_level) {
+            ob_end_clean();
+        }
+
+        $this->response->addHeader('Content-Type: application/json');
+        $this->response->setOutput(json_encode($json));
+    }
+
+    // What OpenCart's checkout/success does once an order is placed: empty the cart
+    // and forget the order and checkout choices, so the next purchase starts fresh.
+    private function finishCheckout(): void
+    {
+        $this->cart->clear();
+
+        foreach (['order_id', 'payment_method', 'payment_methods', 'shipping_method', 'shipping_methods', 'comment', 'agree', 'coupon', 'reward', 'voucher', 'vouchers'] as $key) {
+            unset($this->session->data[$key]);
+        }
+    }
+
+    // OC 4.0.2+: getOrder() decodes payment_method JSON and the code is the
+    // `<method>.<option>` form. Older versions keep a plain `payment_code`.
+    private function orderPaymentCode(array $order): string
+    {
+        if (is_array($order['payment_method'] ?? null)) {
+            return (string)($order['payment_method']['code'] ?? '');
+        }
+
+        return (string)($order['payment_code'] ?? '');
     }
 
     public function cron($load_class = true)
@@ -821,7 +900,7 @@ class BlockBee extends \Opencart\System\Engine\Controller
         die('*ok*');
     }
 
-    function order_pay_button(&$route, &$data, &$output)
+    public function order_pay_button(&$route, &$data, &$output)
     {
         $order_id = (int)($this->request->get['order_id'] ?? 0);
         if ($order_id <= 0) {
@@ -834,14 +913,17 @@ class BlockBee extends \Opencart\System\Engine\Controller
         $orderFetch = $this->model_checkout_order->getOrder($order_id);
         $order = $this->model_extension_blockbee_payment_blockbee->getOrder($order_id);
 
-        $orderObj = isset($order['response']) ? json_decode($order['response']) : '';
+        $orderObj = isset($order['response']) ? json_decode($order['response']) : null;
 
-        if (!$orderObj) {
+        if (!is_object($orderObj) || empty($orderFetch)) {
             return;
         }
 
-        if ((int)$orderObj->blockbee_canceled === 0 && isset($orderObj->blockbee_payment_url) && (int)$orderFetch['order_status_id'] === 1) {
-            $data['button_continue'] = 'Pay Order';
+        // Runs as a view event: stay notice-free, OpenCart turns any notice into page output or a redirect.
+        $pending_status_id = (int)$this->config->get('payment_blockbee_order_status_id');
+        if ((int)($orderObj->blockbee_canceled ?? 0) === 0 && !empty($orderObj->blockbee_payment_url) && (int)$orderFetch['order_status_id'] === $pending_status_id) {
+            $this->load->language('extension/blockbee/payment/blockbee', 'blockbee');
+            $data['button_continue'] = $this->language->get('blockbee_button_pay');
             $data['continue'] = $orderObj->blockbee_payment_url;   // already &amp;-decoded + token
         }
     }

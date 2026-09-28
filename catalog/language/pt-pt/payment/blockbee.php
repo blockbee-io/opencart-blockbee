@@ -1,7 +1,7 @@
 <?php
 
 // Text
-$_['text_title'] = 'Criptomoeda' . ' <img src="' . HTTP_SERVER . 'image/catalog/blockbee/payment.png" alt="blockbee" style="height:23px" />';
+$_['text_title'] = 'Pagar com cripto';
 $_['text_legend'] = 'Pagar com criptomoeda';
 $_['text_basket'] = 'Cesto';
 $_['text_checkout'] = 'Finalizar compra';
@@ -21,6 +21,9 @@ $_['error_adress']  = 'Esta criptomoeda não pode ser usada para pagamento neste
 $_['error_conversion']  = 'Não foi possível determinar o valor do pagamento neste momento, tente novamente.';
 
 $_['button_pay'] = 'Pagar agora';
+$_['text_fee'] = 'Taxa';
+$_['error_request'] = 'Não foi possível iniciar o pagamento. Por favor, tente novamente.';
+$_['text_status_offline'] = 'De momento não conseguimos verificar o estado do seu pagamento. Se já pagou, o seu pagamento será registado normalmente. Mantenha esta página aberta ou atualize-a dentro de instantes.';
 
 $_['branding_logo'] = '<img src="' . HTTP_SERVER . 'image/catalog/blockbee/payment_success.png" alt="blockbee" style="width:122px;" />';
 $_['wallet_text'] = 'CARTEIRA';

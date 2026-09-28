@@ -2,6 +2,7 @@
 
 // Heading
 $_['heading_title'] = 'BlockBee';
+$_['text_default_title'] = 'Pagar com cripto';
 
 $_['title'] = 'Título';
 

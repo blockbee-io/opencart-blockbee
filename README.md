@@ -6,7 +6,8 @@ Accept cryptocurrency payments on your OpenCart store
 ### Requirements:
 
 ```
-OpenCart >= 4.0
+OpenCart 4.0.0.0 - 4.1.0.4
+PHP >= 8.0
 ```
 
 ### Description
@@ -173,5 +174,9 @@ The easiest and fastest way is via our live chat on our [website](https://blockb
 #### 1.2.0
 * Bugfixes and security improvements
 
+#### 1.3.0
+* Bugfixes
+
 ### Upgrade Notice
 * No breaking changes.
+* After upgrading, open the BlockBee settings page once. This repairs the extension's events.

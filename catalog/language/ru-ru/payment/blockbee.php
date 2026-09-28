@@ -1,7 +1,7 @@
 <?php
 
 // Text
-$_['text_title'] = 'Криптовалюта' . ' <img src="' . HTTP_SERVER . 'image/catalog/blockbee/payment.png" alt="blockbee" style="height:23px" />';
+$_['text_title'] = 'Оплата криптовалютой';
 $_['text_legend'] = 'Оплатить криптовалютой';
 $_['text_basket'] = 'Корзина';
 $_['text_checkout'] = 'Оформить заказ';
@@ -21,6 +21,9 @@ $_['error_adress']  = 'Эта криптовалюта в данный моме�
 $_['error_conversion']  = 'Не удалось определить сумму платежа в данный момент, попробуйте ещё раз.';
 
 $_['button_pay'] = 'Оплатить сейчас';
+$_['text_fee'] = 'Комиссия';
+$_['error_request'] = 'Не удалось начать оплату. Пожалуйста, попробуйте ещё раз.';
+$_['text_status_offline'] = 'Сейчас не удаётся проверить статус оплаты. Если вы уже отправили платёж, он всё равно будет зачислен. Оставьте страницу открытой или обновите её чуть позже.';
 
 $_['branding_logo'] = '<img src="' . HTTP_SERVER . 'image/catalog/blockbee/payment_success.png" alt="blockbee" style="width:122px;" />';
 $_['wallet_text'] = 'КОШЕЛЁК';

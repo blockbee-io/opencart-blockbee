@@ -3,27 +3,14 @@ namespace Opencart\Catalog\Model\Extension\BlockBee\Payment;
 
 class BlockBee extends \Opencart\System\Engine\Model
 {
+    // OC 4.0.2.0+ checkout.
     public function getMethods(array $address = []): array
     {
-        $this->load->language('extension/blockbee/payment/blockbee');
-
-        if (!$this->config->get('payment_blockbee_status')) {
+        if (!$this->isAvailable($address)) {
             return [];
         }
 
-        $geo_zone_id = (int)$this->config->get('payment_blockbee_standard_geo_zone_id');
-        if ($geo_zone_id > 0) {
-            $query = $this->db->query("SELECT * FROM `" . DB_PREFIX . "zone_to_geo_zone` WHERE `geo_zone_id` = '" . $geo_zone_id . "' AND `country_id` = '" . (int)($address['country_id'] ?? 0) . "' AND (`zone_id` = '" . (int)($address['zone_id'] ?? 0) . "' OR `zone_id` = '0')");
-            if (!$query->num_rows) {
-                return [];
-            }
-        }
-
-        if (!$this->validateCurrencies()) {
-            return [];
-        }
-
-        $name = $this->config->get('payment_blockbee_title') ?: $this->language->get('heading_title');
+        $name = $this->getTitle();
 
         return [
             'code'       => 'blockbee',
@@ -38,14 +25,59 @@ class BlockBee extends \Opencart\System\Engine\Model
         ];
     }
 
+    // OC 4.0.0.0 - 4.0.1.x checkout: one method per extension, no options.
+    public function getMethod(array $address = []): array
+    {
+        if (!$this->isAvailable($address)) {
+            return [];
+        }
+
+        return [
+            'code'       => 'blockbee',
+            'title'      => $this->getTitle(),
+            'sort_order' => $this->config->get('payment_blockbee_sort_order'),
+        ];
+    }
+
+    // The catalog language files have no heading_title: falling back to it showed
+    // the literal text "heading_title" at checkout when the title was left empty.
+    private function getTitle(): string
+    {
+        $this->load->language('extension/blockbee/payment/blockbee');
+
+        return (string)($this->config->get('payment_blockbee_title') ?: $this->language->get('text_title'));
+    }
+
+    private function isAvailable(array $address): bool
+    {
+        if (!$this->config->get('payment_blockbee_status')) {
+            return false;
+        }
+
+        $geo_zone_id = (int)$this->config->get('payment_blockbee_standard_geo_zone_id');
+        if ($geo_zone_id > 0) {
+            $query = $this->db->query("SELECT * FROM `" . DB_PREFIX . "zone_to_geo_zone` WHERE `geo_zone_id` = '" . $geo_zone_id . "' AND `country_id` = '" . (int)($address['country_id'] ?? 0) . "' AND (`zone_id` = '" . (int)($address['zone_id'] ?? 0) . "' OR `zone_id` = '0')");
+            if (!$query->num_rows) {
+                return false;
+            }
+        }
+
+        return (bool)$this->validateCurrencies();
+    }
+
     public function validateCurrencies()
     {
         $status = false;
 
         $cryptocurrencies = array();
 
-        foreach ($this->config->get('payment_blockbee_cryptocurrencies') as $selected) {
-            foreach (json_decode(html_entity_decode($this->config->get('payment_blockbee_cryptocurrencies_array_cache'), ENT_QUOTES | ENT_HTML5, 'UTF-8'), true) as $token => $coin) {
+        // Both settings are empty until the admin saves the coin list. Core lists
+        // payment methods from this call, and OpenCart turns a foreach-over-null
+        // warning into broken output for every payment method, so cast.
+        $coin_cache = json_decode(html_entity_decode((string)$this->config->get('payment_blockbee_cryptocurrencies_array_cache'), ENT_QUOTES | ENT_HTML5, 'UTF-8'), true);
+
+        foreach ((array)$this->config->get('payment_blockbee_cryptocurrencies') as $selected) {
+            foreach ((array)$coin_cache as $token => $coin) {
                 if ($selected === $token) {
                     $cryptocurrencies += [
                         $token => $coin,
@@ -81,13 +113,22 @@ class BlockBee extends \Opencart\System\Engine\Model
 
     public function getOrders()
     {
-        // `payment_method` is JSON-encoded in OpenCart 4.x; filter via LIKE on the
+        // OC 4.0.2+: `payment_method` is JSON-encoded; filter via LIKE on the
         // serialized form (no spaces — PHP's json_encode never adds them).
+        // Older versions keep the code in `payment_code`, a column 4.0.2 drops.
         // `age_seconds` lets the caller compare against the cancellation timeout
         // using the same clock that wrote `date_added` (avoids PHP/DB TZ skew).
+        if (version_compare(VERSION, '4.0.2.0', '>=')) {
+            $is_blockbee = "`payment_method` LIKE '%\"code\":\"blockbee.blockbee\"%'";
+        } else {
+            $is_blockbee = "`payment_code` = 'blockbee'";
+        }
+
+        $pending_status_id = (int)$this->config->get('payment_blockbee_order_status_id') ?: 1;
+
         $qry = $this->db->query("SELECT *, (UNIX_TIMESTAMP(NOW()) - UNIX_TIMESTAMP(`date_added`)) AS `age_seconds`
             FROM `" . DB_PREFIX . "order`
-            WHERE `payment_method` LIKE '%\"code\":\"blockbee.blockbee\"%' AND `order_status_id` = 1");
+            WHERE " . $is_blockbee . " AND `order_status_id` = '" . $pending_status_id . "'");
 
         if ($qry->num_rows) {
             return $orders = $qry->rows;

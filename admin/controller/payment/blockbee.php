@@ -17,7 +17,18 @@ class BlockBee extends \Opencart\System\Engine\Controller
 
         $this->load->model('extension/blockbee/payment/blockbee');
 
-        if (($this->request->server['REQUEST_METHOD'] == 'POST')) {
+        // Core's startup only enforces 'access'. Saving needs 'modify': these settings
+        // hold the API key, so a view-only admin must not change them.
+        $can_modify = $this->user->hasPermission('modify', 'extension/blockbee/payment/blockbee');
+
+        // Repair events on stores upgraded from an older release (install() doesn't re-run on upgrade).
+        if ($can_modify) {
+            $this->model_extension_blockbee_payment_blockbee->syncEvents();
+        }
+
+        if (($this->request->server['REQUEST_METHOD'] == 'POST') && !$can_modify) {
+            $this->error['warning'] = $this->language->get('error_permission');
+        } elseif (($this->request->server['REQUEST_METHOD'] == 'POST')) {
 
             $a = [];
             if (isset($_POST['payment_blockbee_cryptocurrencies'])) {
@@ -36,7 +47,16 @@ class BlockBee extends \Opencart\System\Engine\Controller
             }
             $this->request->post['payment_blockbee_paid_order_status_ids'] = $paid_statuses;
 
+            // Core's 'admin_currency_setting' event runs the currency-rate engine after
+            // every editSetting(). On PHP 8.5, OpenCart <= 4.1.0.3's ECB engine prints a
+            // curl_close() deprecation there, and the redirect below then fails with
+            // "headers already sent". The settings are saved by then, so drop that output.
+            $ob_level = ob_get_level();
+            ob_start();
             $this->model_setting_setting->editSetting('payment_blockbee', $this->request->post);
+            while (ob_get_level() > $ob_level) {
+                ob_end_clean();
+            }
 
             $this->session->data['success'] = $this->language->get('text_success');
 
@@ -250,17 +270,19 @@ class BlockBee extends \Opencart\System\Engine\Controller
         $this->response->setOutput($this->load->view('extension/blockbee/payment/blockbee', $data));
     }
 
-    public function order_info(&$route, &$data, &$output)
+    // Core's sale/order page calls <payment extension>|order / .order and shows
+    // the returned HTML as a tab on every OC 4 version; no event needed.
+    public function order(): string
     {
         $order_id = (int)($this->request->get['order_id'] ?? 0);
         $this->load->model('extension/blockbee/payment/blockbee');
         $order = $this->model_extension_blockbee_payment_blockbee->getOrder($order_id);
-        if (!$order) { return; }
+        if (!$order) { return ''; }
 
         $metaData = $order['response'];
-        if (empty($metaData)) { return; }
+        if (empty($metaData)) { return ''; }
         $metaData = json_decode($metaData, true);
-        if (!is_array($metaData)) { return; }
+        if (!is_array($metaData)) { return ''; }
 
         // Escape every dynamic segment; non-scalars are JSON-encoded first.
         $esc = static function ($v): string {
@@ -303,9 +325,36 @@ class BlockBee extends \Opencart\System\Engine\Controller
             }
         }
 
-        if (isset($data['tabs'][0]['code']) && $data['tabs'][0]['code'] === 'blockbee') {
-            $data['tabs'][0]['content'] = '<table style="font-size: 13px;" class="table table-bordered">' . $fields . '</table>';
+        return '<table style="font-size: 13px;" class="table table-bordered">' . $fields . '</table>';
+    }
+
+    // OC 4.0.0.0 only (registered by the model's syncEvents()): core builds the
+    // payment tab route as 'extension/payment/blockbee|order', which doesn't
+    // exist, so add the tab here instead.
+    public function order_tab(&$route, &$data, &$output)
+    {
+        if (($data['payment_code'] ?? '') !== 'blockbee') {
+            return;
         }
+
+        foreach ((array)($data['tabs'] ?? []) as $tab) {
+            if (($tab['code'] ?? '') === 'blockbee') {
+                return;
+            }
+        }
+
+        $content = $this->order();
+        if ($content === '') {
+            return;
+        }
+
+        $this->load->language('extension/blockbee/payment/blockbee', 'blockbee');
+
+        $data['tabs'][] = [
+            'code'    => 'blockbee',
+            'title'   => $this->language->get('blockbee_heading_title'),
+            'content' => $content,
+        ];
     }
 
     public function install(): void

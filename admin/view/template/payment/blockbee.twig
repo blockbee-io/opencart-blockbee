@@ -57,7 +57,7 @@
                                 <div class="col-sm-10">
                                     <div class="input-group">
                                         <input class="form-control" type="text" id="blockbee_blockbee_title" name='payment_blockbee_title'
-                                               {% if payment_blockbee_title is empty %}value="Cryptocurrency" {% else %}value="{{ payment_blockbee_title }}"{% endif %}>
+                                               {% if payment_blockbee_title is empty %}value="{{ text_default_title|e('html_attr') }}" {% else %}value="{{ payment_blockbee_title }}"{% endif %}>
                                     </div>
                                 </div>
                             </div>

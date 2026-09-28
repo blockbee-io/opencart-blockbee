@@ -2,23 +2,12 @@
 namespace Opencart\Admin\Model\Extension\BlockBee\Payment;
 
 class BlockBee extends \Opencart\System\Engine\Model {
+    // Events from releases before 1.3.0. The admin tab now comes from the payment
+    // controller's order() method, and the success-page redirect never fired.
+    private const RETIRED_EVENTS = ['blockbee_order_info', 'blockbee_after_purchase'];
 
     public function install(): void {
-        // Create events
-        $this->load->model('setting/event');
-
-
-        if (!$this->model_setting_event->getEventByCode('blockbee_order_info')) {
-            $this->model_setting_event->addEvent(['code' => 'blockbee_order_info', 'description' => '', 'trigger' => 'admin/view/sale/order_info/before', 'action' => 'extension/blockbee/payment/blockbee|order_info', 'status' => 1, 'sort_order' => '1']);
-        }
-
-        if (!$this->model_setting_event->getEventByCode('blockbee_order_button')) {
-            $this->model_setting_event->addEvent(['code' => 'blockbee_order_button', 'description' => '', 'trigger' => 'catalog/view/account/order_info/before', 'action' => 'extension/blockbee/payment/blockbee|order_pay_button', 'status' => 1, 'sort_order' => '1']);
-        }
-
-        if (!$this->model_setting_event->getEventByCode('blockbee_after_purchase')) {
-            $this->model_setting_event->addEvent(['code' => 'blockbee_after_purchase', 'description' => '', 'trigger' => 'catalog/view/common/success/after', 'action' => 'extension/blockbee/payment/blockbee|after_purchase', 'status' => 1, 'sort_order' => '1']);
-        }
+        $this->syncEvents();
 
         // Create order db table
         $this->db->query("
@@ -37,12 +26,66 @@ class BlockBee extends \Opencart\System\Engine\Model {
     {
         $this->load->model('setting/event');
 
-        foreach (['blockbee_order_info', 'blockbee_order_button', 'blockbee_after_purchase'] as $code) {
+        foreach (array_merge(['blockbee_order_button', 'blockbee_order_tab'], self::RETIRED_EVENTS) as $code) {
             $this->model_setting_event->deleteEventByCode($code);
         }
 
         // `oc_blockbee_order` is intentionally not dropped — keeps order history
         // available if the extension is reinstalled later.
+    }
+
+    /**
+     * Make the stored events match this OpenCart version. Safe to call on every
+     * settings page load: it only writes when something is wrong.
+     */
+    public function syncEvents(): void
+    {
+        $this->load->model('setting/event');
+
+        // OC 4.0.2+ splits event actions on '.', older versions on '|'. A stored
+        // action with the wrong separator resolves to a missing class and core
+        // skips it without an error.
+        $separator = version_compare(VERSION, '4.0.2.0', '>=') ? '.' : '|';
+
+        $wanted = [
+            'blockbee_order_button' => ['catalog/view/account/order_info/before', 'order_pay_button'],
+        ];
+
+        // OC 4.0.0.0 builds the admin tab route without the extension folder, so
+        // core never calls our order(). Add the tab from a view event there only.
+        if (version_compare(VERSION, '4.0.1.0', '<')) {
+            $wanted['blockbee_order_tab'] = ['admin/view/sale/order_info/before', 'order_tab'];
+        }
+
+        foreach (array_merge(self::RETIRED_EVENTS, ['blockbee_order_tab']) as $code) {
+            if (!isset($wanted[$code]) && $this->model_setting_event->getEventByCode($code)) {
+                $this->model_setting_event->deleteEventByCode($code);
+            }
+        }
+
+        foreach ($wanted as $code => [$trigger, $method]) {
+            $action = 'extension/blockbee/payment/blockbee' . $separator . $method;
+
+            $event = $this->model_setting_event->getEventByCode($code);
+            if ($event && ($event['action'] ?? '') === $action && ($event['trigger'] ?? '') === $trigger) {
+                continue;
+            }
+            if ($event) {
+                $this->model_setting_event->deleteEventByCode($code);
+            }
+
+            $this->addEvent($code, $trigger, $action);
+        }
+    }
+
+    // OC 4.0.0.0 takes positional arguments; 4.0.1.0+ takes an array.
+    private function addEvent(string $code, string $trigger, string $action): void
+    {
+        if (version_compare(VERSION, '4.0.1.0', '>=')) {
+            $this->model_setting_event->addEvent(['code' => $code, 'description' => '', 'trigger' => $trigger, 'action' => $action, 'status' => 1, 'sort_order' => 1]);
+        } else {
+            $this->model_setting_event->addEvent($code, '', $trigger, $action, true, 1);
+        }
     }
 
     /**

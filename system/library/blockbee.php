@@ -410,9 +410,14 @@ class BlockBeeHelper
         curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 2);
         curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 1);
         curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+        // Without limits a slow or blocked connection hangs checkout until PHP gives up
+        // (cURL's own connect default is 300s), leaving the customer's button spinning.
+        curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_setopt($curl, CURLOPT_TIMEOUT, 15);
 
+        // No curl_close(): a no-op since PHP 8.0 and deprecated in PHP 8.5, where
+        // OpenCart's error handler would corrupt the JSON response.
         $response = curl_exec($curl);
-        curl_close($curl);
 
         if ($response === false || $response === '') {
             return null;
