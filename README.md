@@ -139,6 +139,10 @@ The easiest and fastest way is via our live chat on our [website](https://blockb
 * Add new choices for order cancellation.
 * Minor bugfixes.
 
+#### 1.0.5
+* Bugfixes and security improvements.
+
 ### Upgrade Notice
 
 - No breaking changes
+- From 1.0.5 the server must reach api.blockbee.io over HTTPS with a valid certificate.
